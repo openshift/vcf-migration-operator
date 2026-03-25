@@ -1,0 +1,312 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: |-
+      [
+        {
+          "apiVersion": "migration.openshift.io/v1alpha1",
+          "kind": "VmwareCloudFoundationMigration",
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/managed-by": "kustomize",
+              "app.kubernetes.io/name": "vcf-migration-operator"
+            },
+            "name": "vcf-migration-sample"
+          },
+          "spec": {
+            "failureDomains": [
+              {
+                "name": "target-fd-1",
+                "region": "target-region",
+                "server": "vcenter-target.example.com",
+                "topology": {
+                  "computeCluster": "/TargetDC/host/TargetCluster",
+                  "datacenter": "TargetDC",
+                  "datastore": "/TargetDC/datastore/TargetDatastore",
+                  "folder": "/TargetDC/vm/my-cluster-infra-id",
+                  "networks": [
+                    "VM Network"
+                  ],
+                  "resourcePool": "/TargetDC/host/TargetCluster/Resources",
+                  "template": "/TargetDC/vm/rhcos-template"
+                },
+                "zone": "target-zone-1"
+              }
+            ],
+            "state": "Pending",
+            "targetVCenterCredentialsSecret": {
+              "name": "target-vcenter-creds",
+              "namespace": "openshift-vcf-migration"
+            }
+          }
+        }
+      ]
+    capabilities: Basic Install
+    createdAt: "2026-02-17T18:22:12Z"
+    operators.operatorframework.io/builder: operator-sdk-v1.42.0
+    operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
+  name: vcf-migration-operator.v0.0.1
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: |-
+        VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
+        It orchestrates migration of an OpenShift cluster from one vCenter to another.
+      displayName: Vmware Cloud Foundation Migration
+      kind: VmwareCloudFoundationMigration
+      name: vmwarecloudfoundationmigrations.migration.openshift.io
+      version: v1alpha1
+  description: Migrate OCP from source to destination VCF workload
+  displayName: VCF Migration Operator
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      clusterPermissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - configmaps
+          - pods
+          - secrets
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        - apiGroups:
+          - ""
+          resources:
+          - nodes
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - apiextensions.k8s.io
+          resources:
+          - customresourcedefinitions
+          verbs:
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - apps
+          resources:
+          - deployments
+          verbs:
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - config.openshift.io
+          resources:
+          - clusteroperators
+          - infrastructures
+          verbs:
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - machine.openshift.io
+          resources:
+          - controlplanemachinesets
+          - machines
+          - machinesets
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - migration.openshift.io
+          resources:
+          - vmwarecloudfoundationmigrations
+          verbs:
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - migration.openshift.io
+          resources:
+          - vmwarecloudfoundationmigrations/finalizers
+          verbs:
+          - update
+        - apiGroups:
+          - migration.openshift.io
+          resources:
+          - vmwarecloudfoundationmigrations/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - authentication.k8s.io
+          resources:
+          - tokenreviews
+          verbs:
+          - create
+        - apiGroups:
+          - authorization.k8s.io
+          resources:
+          - subjectaccessreviews
+          verbs:
+          - create
+        serviceAccountName: vcf-migration-operator-controller-manager
+      deployments:
+      - label:
+          app.kubernetes.io/managed-by: kustomize
+          app.kubernetes.io/name: vcf-migration-operator
+          control-plane: controller-manager
+        name: vcf-migration-operator-controller-manager
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: vcf-migration-operator
+              control-plane: controller-manager
+          strategy: {}
+          template:
+            metadata:
+              annotations:
+                kubectl.kubernetes.io/default-container: manager
+              labels:
+                app.kubernetes.io/name: vcf-migration-operator
+                control-plane: controller-manager
+            spec:
+              containers:
+              - args:
+                - --metrics-bind-address=:8443
+                - --leader-elect
+                - --health-probe-bind-address=:8081
+                command:
+                - /manager
+                image: controller:latest
+                livenessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: 8081
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+                name: manager
+                readinessProbe:
+                  httpGet:
+                    path: /readyz
+                    port: 8081
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                resources:
+                  limits:
+                    cpu: 500m
+                    memory: 128Mi
+                  requests:
+                    cpu: 10m
+                    memory: 64Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                    - ALL
+              securityContext:
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              serviceAccountName: vcf-migration-operator-controller-manager
+              terminationGracePeriodSeconds: 10
+      permissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - configmaps
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - ""
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        serviceAccountName: vcf-migration-operator-controller-manager
+    strategy: deployment
+  installModes:
+  - supported: false
+    type: OwnNamespace
+  - supported: false
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - vcf
+  - vmware
+  - vsphere
+  - ocp
+  links:
+  - name: Vcf Migration Operator
+    url: https://vcf-migration-operator.domain
+  maintainers:
+  - email: ocp-splat-team@redhat.com
+    name: SPLAT
+  maturity: alpha
+  provider:
+    name: Red Hat
+  version: 0.0.1

@@ -1,0 +1,26 @@
+apiVersion: migration.openshift.io/v1alpha1
+kind: VmwareCloudFoundationMigration
+metadata:
+  labels:
+    app.kubernetes.io/name: vcf-migration-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: vcf-migration-sample
+spec:
+  state: Pending
+  targetVCenterCredentialsSecret:
+    name: target-vcenter-creds
+    namespace: openshift-vcf-migration
+  failureDomains:
+    - name: target-fd-1
+      region: target-region
+      zone: target-zone-1
+      server: vcenter-target.example.com
+      topology:
+        datacenter: TargetDC
+        computeCluster: /TargetDC/host/TargetCluster
+        datastore: /TargetDC/datastore/TargetDatastore
+        networks:
+          - "VM Network"
+        resourcePool: /TargetDC/host/TargetCluster/Resources
+        template: /TargetDC/vm/rhcos-template
+        folder: /TargetDC/vm/my-cluster-infra-id
