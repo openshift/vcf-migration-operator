@@ -1,0 +1,20 @@
+import { __rest } from "tslib";
+import * as React from 'react';
+import styles from '@patternfly/react-styles/css/components/Toolbar/toolbar.mjs';
+import { css } from '@patternfly/react-styles';
+import { formatBreakpointMods, toCamel } from '../../helpers/util';
+import { PageContext } from '../Page/PageContext';
+export var ToolbarGroupVariant;
+(function (ToolbarGroupVariant) {
+    ToolbarGroupVariant["filter-group"] = "filter-group";
+    ToolbarGroupVariant["icon-button-group"] = "icon-button-group";
+    ToolbarGroupVariant["button-group"] = "button-group";
+})(ToolbarGroupVariant || (ToolbarGroupVariant = {}));
+class ToolbarGroupWithRef extends React.Component {
+    render() {
+        const _a = this.props, { visibility, align, alignItems, alignSelf, spacer, spaceItems, className, variant, children, isOverflowContainer, innerRef } = _a, props = __rest(_a, ["visibility", "align", "alignItems", "alignSelf", "spacer", "spaceItems", "className", "variant", "children", "isOverflowContainer", "innerRef"]);
+        return (React.createElement(PageContext.Consumer, null, ({ width, getBreakpoint }) => (React.createElement("div", Object.assign({ className: css(styles.toolbarGroup, variant && styles.modifiers[toCamel(variant)], formatBreakpointMods(visibility, styles, '', getBreakpoint(width)), formatBreakpointMods(align, styles, '', getBreakpoint(width)), formatBreakpointMods(spacer, styles, '', getBreakpoint(width)), formatBreakpointMods(spaceItems, styles, '', getBreakpoint(width)), alignItems === 'start' && styles.modifiers.alignItemsStart, alignItems === 'center' && styles.modifiers.alignItemsCenter, alignItems === 'baseline' && styles.modifiers.alignItemsBaseline, alignSelf === 'start' && styles.modifiers.alignSelfStart, alignSelf === 'center' && styles.modifiers.alignSelfCenter, alignSelf === 'baseline' && styles.modifiers.alignSelfBaseline, isOverflowContainer && styles.modifiers.overflowContainer, className) }, props, { ref: innerRef }), children))));
+    }
+}
+export const ToolbarGroup = React.forwardRef((props, ref) => (React.createElement(ToolbarGroupWithRef, Object.assign({}, props, { innerRef: ref }))));
+//# sourceMappingURL=ToolbarGroup.js.map

@@ -1,0 +1,13 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`matches hint snapshot 1`] = `
+<DocumentFragment>
+  <div
+    class="pf-v5-c-hint"
+  >
+    <div
+      class="pf-v5-c-hint__actions"
+    />
+  </div>
+</DocumentFragment>
+`;

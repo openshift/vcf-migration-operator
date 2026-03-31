@@ -1,0 +1,6 @@
+export const c_nav_c_menu_m_flyout__item_PaddingLeft: {
+  "name": "--pf-v5-c-nav--c-menu--m-flyout__item--PaddingLeft",
+  "value": "1.5rem",
+  "var": "var(--pf-v5-c-nav--c-menu--m-flyout__item--PaddingLeft)"
+};
+export default c_nav_c_menu_m_flyout__item_PaddingLeft;

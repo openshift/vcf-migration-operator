@@ -1,0 +1,52 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: '[]'
+    capabilities: Basic Install
+  name: vcf-migration-operator.v0.0.0
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: |-
+        VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
+        It orchestrates migration of an OpenShift cluster from one vCenter to another.
+      displayName: Vmware Cloud Foundation Migration
+      kind: VmwareCloudFoundationMigration
+      name: vmwarecloudfoundationmigrations.migration.openshift.io
+      version: v1alpha1
+  description: Migrate OCP from source to destination VCF workload
+  displayName: VCF Migration Operator
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      deployments: null
+    strategy: ""
+  installModes:
+  - supported: false
+    type: OwnNamespace
+  - supported: false
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - vcf
+  - vmware
+  - vsphere
+  - ocp
+  links:
+  - name: Vcf Migration Operator
+    url: https://vcf-migration-operator.domain
+  maintainers:
+  - email: ocp-splat-team@redhat.com
+    name: SPLAT
+  maturity: alpha
+  provider:
+    name: Red Hat
+  version: 0.0.0

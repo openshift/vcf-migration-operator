@@ -1,0 +1,374 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: vmwarecloudfoundationmigrations.migration.openshift.io
+spec:
+  group: migration.openshift.io
+  names:
+    kind: VmwareCloudFoundationMigration
+    listKind: VmwareCloudFoundationMigrationList
+    plural: vmwarecloudfoundationmigrations
+    shortNames:
+    - vcfm
+    singular: vmwarecloudfoundationmigration
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.state
+      name: State
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
+          It orchestrates migration of an OpenShift cluster from one vCenter to another.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VmwareCloudFoundationMigrationSpec defines the desired state
+              of VmwareCloudFoundationMigration.
+            properties:
+              failureDomains:
+                description: |-
+                  FailureDomains defines failure domains for the target vCenter.
+                  Uses OpenShift's standard VSpherePlatformFailureDomainSpec which includes
+                  Name, Region, Zone, Server, and Topology with all necessary fields.
+                items:
+                  description: VSpherePlatformFailureDomainSpec holds the region and
+                    zone failure domain and the vCenter topology of that failure domain.
+                  properties:
+                    name:
+                      description: |-
+                        name defines the arbitrary but unique name
+                        of a failure domain.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    region:
+                      description: |-
+                        region defines the name of a region tag that will
+                        be attached to a vCenter datacenter. The tag
+                        category in vCenter must be named openshift-region.
+                      maxLength: 80
+                      minLength: 1
+                      type: string
+                    regionAffinity:
+                      description: |-
+                        regionAffinity holds the type of region, Datacenter or ComputeCluster.
+                        When set to Datacenter, this means the region is a vCenter Datacenter as defined in topology.
+                        When set to ComputeCluster, this means the region is a vCenter Cluster as defined in topology.
+                      properties:
+                        type:
+                          description: |-
+                            type determines the vSphere object type for a region within this failure domain.
+                            Available types are Datacenter and ComputeCluster.
+                            When set to Datacenter, this means the vCenter Datacenter defined is the region.
+                            When set to ComputeCluster, this means the vCenter cluster defined is the region.
+                          enum:
+                          - ComputeCluster
+                          - Datacenter
+                          type: string
+                      required:
+                      - type
+                      type: object
+                    server:
+                      description: server is the fully-qualified domain name or the
+                        IP address of the vCenter server.
+                      maxLength: 255
+                      minLength: 1
+                      type: string
+                    topology:
+                      description: topology describes a given failure domain using
+                        vSphere constructs
+                      properties:
+                        computeCluster:
+                          description: |-
+                            computeCluster the absolute path of the vCenter cluster
+                            in which virtual machine will be located.
+                            The absolute path is of the form /<datacenter>/host/<cluster>.
+                            The maximum length of the path is 2048 characters.
+                          maxLength: 2048
+                          pattern: ^/.*?/host/.*?
+                          type: string
+                        datacenter:
+                          description: |-
+                            datacenter is the name of vCenter datacenter in which virtual machines will be located.
+                            The maximum length of the datacenter name is 80 characters.
+                          maxLength: 80
+                          type: string
+                        datastore:
+                          description: |-
+                            datastore is the absolute path of the datastore in which the
+                            virtual machine is located.
+                            The absolute path is of the form /<datacenter>/datastore/<datastore>
+                            The maximum length of the path is 2048 characters.
+                          maxLength: 2048
+                          pattern: ^/.*?/datastore/.*?
+                          type: string
+                        folder:
+                          description: |-
+                            folder is the absolute path of the folder where
+                            virtual machines are located. The absolute path
+                            is of the form /<datacenter>/vm/<folder>.
+                            The maximum length of the path is 2048 characters.
+                          maxLength: 2048
+                          pattern: ^/.*?/vm/.*?
+                          type: string
+                        networks:
+                          description: |-
+                            networks is the list of port group network names within this failure domain.
+                            If feature gate VSphereMultiNetworks is enabled, up to 10 network adapters may be defined.
+                            10 is the maximum number of virtual network devices which may be attached to a VM as defined by:
+                            https://configmax.esp.vmware.com/guest?vmwareproduct=vSphere&release=vSphere%208.0&categories=1-0
+                            The available networks (port groups) can be listed using
+                            `govc ls 'network/*'`
+                            Networks should be in the form of an absolute path:
+                            /<datacenter>/network/<portgroup>.
+                          items:
+                            type: string
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        resourcePool:
+                          description: |-
+                            resourcePool is the absolute path of the resource pool where virtual machines will be
+                            created. The absolute path is of the form /<datacenter>/host/<cluster>/Resources/<resourcepool>.
+                            The maximum length of the path is 2048 characters.
+                          maxLength: 2048
+                          pattern: ^/.*?/host/.*?/Resources.*
+                          type: string
+                        template:
+                          description: |-
+                            template is the full inventory path of the virtual machine or template
+                            that will be cloned when creating new machines in this failure domain.
+                            The maximum length of the path is 2048 characters.
+
+                            When omitted, the template will be calculated by the control plane
+                            machineset operator based on the region and zone defined in
+                            VSpherePlatformFailureDomainSpec.
+                            For example, for zone=zonea, region=region1, and infrastructure name=test,
+                            the template path would be calculated as /<datacenter>/vm/test-rhcos-region1-zonea.
+                          maxLength: 2048
+                          minLength: 1
+                          pattern: ^/.*?/vm/.*?
+                          type: string
+                      required:
+                      - computeCluster
+                      - datacenter
+                      - datastore
+                      - networks
+                      type: object
+                    zone:
+                      description: |-
+                        zone defines the name of a zone tag that will
+                        be attached to a vCenter cluster. The tag
+                        category in vCenter must be named openshift-zone.
+                      maxLength: 80
+                      minLength: 1
+                      type: string
+                    zoneAffinity:
+                      description: |-
+                        zoneAffinity holds the type of the zone and the hostGroup which
+                        vmGroup and the hostGroup names in vCenter corresponds to
+                        a vm-host group of type Virtual Machine and Host respectively. Is also
+                        contains the vmHostRule which is an affinity vm-host rule in vCenter.
+                      properties:
+                        hostGroup:
+                          description: |-
+                            hostGroup holds the vmGroup and the hostGroup names in vCenter
+                            corresponds to a vm-host group of type Virtual Machine and Host respectively. Is also
+                            contains the vmHostRule which is an affinity vm-host rule in vCenter.
+                          properties:
+                            hostGroup:
+                              description: |-
+                                hostGroup is the name of the vm-host group of type host within vCenter for this failure domain.
+                                hostGroup is limited to 80 characters.
+                                This field is required when the VSphereFailureDomain ZoneType is HostGroup
+                              maxLength: 80
+                              minLength: 1
+                              type: string
+                            vmGroup:
+                              description: |-
+                                vmGroup is the name of the vm-host group of type virtual machine within vCenter for this failure domain.
+                                vmGroup is limited to 80 characters.
+                                This field is required when the VSphereFailureDomain ZoneType is HostGroup
+                              maxLength: 80
+                              minLength: 1
+                              type: string
+                            vmHostRule:
+                              description: |-
+                                vmHostRule is the name of the affinity vm-host rule within vCenter for this failure domain.
+                                vmHostRule is limited to 80 characters.
+                                This field is required when the VSphereFailureDomain ZoneType is HostGroup
+                              maxLength: 80
+                              minLength: 1
+                              type: string
+                          required:
+                          - hostGroup
+                          - vmGroup
+                          - vmHostRule
+                          type: object
+                        type:
+                          description: |-
+                            type determines the vSphere object type for a zone within this failure domain.
+                            Available types are ComputeCluster and HostGroup.
+                            When set to ComputeCluster, this means the vCenter cluster defined is the zone.
+                            When set to HostGroup, hostGroup must be configured with hostGroup, vmGroup and vmHostRule and
+                            this means the zone is defined by the grouping of those fields.
+                          enum:
+                          - HostGroup
+                          - ComputeCluster
+                          type: string
+                      required:
+                      - type
+                      type: object
+                      x-kubernetes-validations:
+                      - message: hostGroup is required when type is HostGroup, and
+                          forbidden otherwise
+                        rule: 'has(self.type) && self.type == ''HostGroup'' ?  has(self.hostGroup)
+                          : !has(self.hostGroup)'
+                  required:
+                  - name
+                  - region
+                  - server
+                  - topology
+                  - zone
+                  type: object
+                minItems: 1
+                type: array
+              state:
+                default: Pending
+                description: |-
+                  State controls the workflow: Pending, Running, Paused.
+                  The reconciler only acts when State is Running.
+                enum:
+                - Pending
+                - Running
+                - Paused
+                type: string
+              targetVCenterCredentialsSecret:
+                description: |-
+                  TargetVCenterCredentialsSecret references the secret containing target vCenter credentials.
+                  The secret must contain keys: {target-vcenter-fqdn}.username and {target-vcenter-fqdn}.password.
+                properties:
+                  name:
+                    description: Name is the secret name.
+                    type: string
+                  namespace:
+                    description: Namespace is the secret namespace.
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - failureDomains
+            - state
+            - targetVCenterCredentialsSecret
+            type: object
+          status:
+            description: VmwareCloudFoundationMigrationStatus defines the observed
+              state of VmwareCloudFoundationMigration.
+            properties:
+              completionTime:
+                description: CompletionTime is when the migration completed.
+                format: date-time
+                type: string
+              conditions:
+                description: |-
+                  Conditions represent the current state of the migration.
+                  Each condition corresponds to a stage of the migration workflow.
+                  Standard Kubernetes conditions using metav1.Condition.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              startTime:
+                description: StartTime is when the migration started.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
