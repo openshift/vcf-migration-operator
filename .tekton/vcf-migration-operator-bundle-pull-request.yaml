@@ -1,0 +1,65 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  annotations:
+    build.appstudio.openshift.io/repo: https://github.com/openshift/vcf-migration-operator?rev={{revision}}
+    build.appstudio.redhat.com/commit_sha: '{{revision}}'
+    build.appstudio.redhat.com/pull_request_number: '{{pull_request_number}}'
+    build.appstudio.redhat.com/target_branch: '{{target_branch}}'
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+    pipelinesascode.tekton.dev/on-cel-expression: event == "pull_request" && target_branch
+      == "main"  && ("bundle/***".pathChanged() || ".tekton/***".pathChanged() ||
+      "bundle.konflux.Dockerfile".pathChanged() || "trigger-konflux-builds.txt".pathChanged()
+      )
+  creationTimestamp: null
+  labels:
+    appstudio.openshift.io/application: vcf-migration-operator
+    appstudio.openshift.io/component: vcf-migration-operator-bundle
+    pipelines.appstudio.openshift.io/type: build
+  name: vcf-migration-operator-bundle-on-pull-request
+  namespace: vcf-migration-ope-tenant
+spec:
+  params:
+  - name: artifact-type
+    value: operatorbundle
+  - name: dockerfile
+    value: bundle.konflux.Dockerfile
+  - name: git-url
+    value: '{{source_url}}'
+  - name: image-expires-after
+    value: 5d
+  - name: output-image
+    value: quay.io/redhat-user-workloads/vcf-migration-ope-tenant/vcf-migration-operator/vcf-migration-operator-bundle:on-pr-{{revision}}
+  - name: path-context
+    value: .
+  - name: revision
+    value: '{{revision}}'
+  - name: build-platforms
+    value:
+    - linux/amd64
+  - name: hermetic
+    value: "true"
+  - name: prefetch-input
+    value: '{"packages": [{"type": "gomod"}], "flags": ["gomod-vendor-check"]}'
+  - name: build-source-image
+    value: "true"
+  pipelineRef:
+    name: single-arch-build-pipeline
+  taskRunTemplate:
+    serviceAccountName: build-pipeline-vcf-migration-operator-bundle
+  workspaces:
+  - name: workspace
+    volumeClaimTemplate:
+      metadata:
+        creationTimestamp: null
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+      status: {}
+  - name: git-auth
+    secret:
+      secretName: '{{ git_auth_secret }}'
+status: {}

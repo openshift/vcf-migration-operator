@@ -1,0 +1,97 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  annotations:
+    build.appstudio.openshift.io/repo: https://github.com/openshift/vcf-migration-operator?rev={{revision}}
+    build.appstudio.redhat.com/commit_sha: '{{revision}}'
+    build.appstudio.redhat.com/target_branch: '{{target_branch}}'
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+    pipelinesascode.tekton.dev/on-cel-expression: event == "push" && target_branch
+      == "main" && (".tekton/***".pathChanged() || "api/***".pathChanged() || "internal/***".pathChanged()
+      || "config/***".pathChanged() || "console-plugin/***".pathChanged() || "test/***".pathChanged() || "konflux.Dockerfile".pathChanged()
+      || "go.mod".pathChanged() || "cmd/***".pathChanged() || "go.sum".pathChanged()
+      || "trigger-konflux-builds.txt".pathChanged() )
+  creationTimestamp: null
+  labels:
+    appstudio.openshift.io/application: vcf-migration-operator
+    appstudio.openshift.io/component: vcf-migration-operator
+    pipelines.appstudio.openshift.io/type: build
+  name: vcf-migration-operator-on-push
+  namespace: vcf-migration-ope-tenant
+spec:
+  params:
+  - name: dockerfile
+    value: konflux.Dockerfile
+  - name: git-url
+    value: '{{source_url}}'
+  - name: output-image
+    value: quay.io/redhat-user-workloads/vcf-migration-ope-tenant/vcf-migration-operator/vcf-migration-operator:{{revision}}
+  - name: path-context
+    value: .
+  - name: revision
+    value: '{{revision}}'
+  - name: build-platforms
+    value:
+    - localhost
+    - linux/arm64
+    - linux/ppc64le
+    - linux/s390x
+  - name: hermetic
+    value: "true"
+  - name: prefetch-input
+    value: '{"packages": [{"type": "gomod"}], "flags": ["gomod-vendor-check"]}'
+  - name: build-source-image
+    value: "true"
+  pipelineRef:
+    name: multi-arch-build-pipeline
+  taskRunTemplate:
+    serviceAccountName: build-pipeline-vcf-migration-operator
+  workspaces:
+  - name: workspace
+    volumeClaimTemplate:
+      metadata:
+        creationTimestamp: null
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+      status: {}
+  - name: workspace-arm64
+    volumeClaimTemplate:
+      metadata:
+      tamp: null
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+      status: {}
+  - name: workspace-s390x
+    volumeClaimTemplate:
+      metadata:
+        creationTimestamp: null
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+      status: {}
+  - name: workspace-ppc64le
+    volumeClaimTemplate:
+      metadata:
+        creationTimestamp: null
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+      status: {}
+  - name: git-auth
+    secret:
+      secretName: '{{ git_auth_secret }}'
+status: {}
