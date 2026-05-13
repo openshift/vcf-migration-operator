@@ -5,5 +5,4 @@ console-plugin/web/dist
 bin
 *.test
 cover.out
-bundle
 .DS_Store
