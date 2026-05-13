@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
-	github.com/openshift/api v0.0.0-20260213204242-d34f11c515b3
+	github.com/openshift/api v0.0.0-20260511191110-9b69e5fa27e9
 	github.com/openshift/client-go v0.0.0-20260213141500-06efc6dce93b
 	github.com/vmware/govmomi v0.52.0
 	gopkg.in/yaml.v2 v2.4.0
