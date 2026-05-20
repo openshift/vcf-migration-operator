@@ -1,24 +1,8 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>konflux-ci/mintmaker//config/renovate/renovate.json"],
   "gomod": {
     "enabled": false
   },
-  "dockerfile": {
-    "enabled": true,
-    "automerge": true,
-    "automergeType": "pr",
-    "automergeStrategy": "rebase",
-    "matchUpdateTypes": [
-      "digest"
-    ],
-    "addLabels": [
-      "approved",
-      "lgtm"
-    ],
-    "platformAutomerge": true
-  },
-  "prConcurrentLimit": 0,
   "pruneBranchAfterAutomerge": true,
   "pruneStaleBranches": true,
   "semanticCommits": "enabled",
@@ -27,21 +11,10 @@
     "automerge": true,
     "automergeType": "pr",
     "automergeStrategy": "rebase",
+    "platformAutomerge": true,
     "addLabels": [
       "approved",
       "lgtm"
-    ],
-    "enabled": true,
-    "managerFilePatterns": [
-      "/\\.yaml$/",
-      "/\\.yml$/"
-    ],
-    "includePaths": [
-      ".tekton/**"
-    ],
-    "platformAutomerge": true,
-    "schedule": [
-      "before 8am on saturday"
     ]
   }
 }
