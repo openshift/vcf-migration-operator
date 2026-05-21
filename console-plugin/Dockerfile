@@ -20,7 +20,7 @@ COPY console-plugin/pkg/ console-plugin/pkg/
 RUN go build -o /plugin ./console-plugin/cmd/plugin
 
 # Stage 3: runtime
-FROM alpine:3.20
+FROM alpine:3.23
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=backend /plugin /app/plugin
