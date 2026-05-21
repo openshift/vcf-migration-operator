@@ -1,7 +1,7 @@
 # Build context must be repo root: docker build -f console-plugin/Dockerfile .
 
 # Stage 1: build frontend
-FROM node:20-alpine AS frontend
+FROM node:24-alpine AS frontend
 WORKDIR /app/web
 COPY console-plugin/web/package.json console-plugin/web/package-lock.json* ./
 RUN npm ci --omit=optional 2>/dev/null || npm install
