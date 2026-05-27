@@ -25,7 +25,6 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	configclient "github.com/openshift/client-go/config/clientset/versioned"
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
-	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,9 +52,8 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	KubeClient          kubernetes.Interface
 	ConfigClient        configclient.Interface
 	MachineClient       machineclient.Interface
-	DynamicClient       dynamic.Interface
-	APIExtensionsClient apiextensionsclient.Interface
-	Recorder            record.EventRecorder
+	DynamicClient dynamic.Interface
+	Recorder      record.EventRecorder
 }
 
 // conditionOrder defines the sequence in which conditions are evaluated.
@@ -69,17 +67,23 @@ var conditionOrder = []string{
 	migrationv1alpha1.ConditionReady,
 }
 
+const reasonWaitingForVSpherePods = "WaitingForVSpherePods"
+
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets;configmaps;pods,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=config.openshift.io,resources=infrastructures;clusteroperators,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=config.openshift.io,resources=clusterversions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=config.openshift.io,resources=featuregates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=machine.openshift.io,resources=machinesets;machines,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=machine.openshift.io,resources=controlplanemachinesets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=machine.openshift.io,resources=machinehealthchecks,verbs=get;list;watch
+// +kubebuilder:rbac:groups=autoscaling.openshift.io,resources=clusterautoscalers;machineautoscalers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives the migration workflow by checking conditions in order and
@@ -157,126 +161,19 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	return ctrl.Result{}, nil
 }
 
-// ensureInfrastructurePrepared validates preflight checks and disables the CVO.
+// ensureInfrastructurePrepared validates preflight checks and selects the
+// migration path without performing disruptive cluster changes.
 func (r *VmwareCloudFoundationMigrationReconciler) ensureInfrastructurePrepared(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
-	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
 
 	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Validating preflight checks")
-
-	// Validate failure domains are present.
-	if len(migration.Spec.FailureDomains) == 0 {
-		return ctrl.Result{}, fmt.Errorf("spec.failureDomains must not be empty")
-	}
-
-	// Validate target credentials secret exists.
-	secretRef := migration.Spec.TargetVCenterCredentialsSecret
-	if secretRef.Name == "" {
-		return ctrl.Result{}, fmt.Errorf("spec.targetVCenterCredentialsSecret.name must not be empty")
-	}
-	ns := secretRef.Namespace
-	if ns == "" {
-		ns = migration.Namespace
-	}
-	if _, err := r.KubeClient.CoreV1().Secrets(ns).Get(ctx, secretRef.Name, metav1.GetOptions{}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("target credentials secret %s/%s not found: %w", ns, secretRef.Name, err)
-	}
-
-	// Get source vCenter from Infrastructure CRD.
-	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient, r.APIExtensionsClient)
-	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
+	message, err := r.runPreflightChecks(ctx, migration)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting source vCenter: %w", err)
+		return ctrl.Result{}, err
 	}
 
-	// Validate source connectivity.
-	sm := openshift.NewSecretManager(r.KubeClient)
-	srcUser, srcPass, err := sm.GetCredentials(ctx, sourceVC.Server)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting source vCenter credentials: %w", err)
-	}
-
-	var srcDC string
-	if len(sourceVC.Datacenters) > 0 {
-		srcDC = sourceVC.Datacenters[0]
-	} else {
-		return ctrl.Result{}, fmt.Errorf("source vCenter has no datacenters configured")
-	}
-
-	srcSession, err := getVSphereSession(ctx, sourceVC.Server, srcDC, srcUser, srcPass)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
-	}
-	log.V(1).Info("source vCenter connectivity validated", "server", sourceVC.Server)
-
-	// Validate source datacenter accessible.
-	if _, err := srcSession.Finder.Datacenter(ctx, srcDC); err != nil {
-		return ctrl.Result{}, fmt.Errorf("source datacenter %q not accessible: %w", srcDC, err)
-	}
-
-	// Validate each target failure domain's topology.
-	for i := range migration.Spec.FailureDomains {
-		fd := &migration.Spec.FailureDomains[i]
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
-			fmt.Sprintf("Validating target failure domain %q", fd.Name))
-
-		username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
-		}
-
-		session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, username, password)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
-		}
-
-		// Validate datacenter.
-		if _, err := session.Finder.Datacenter(ctx, fd.Topology.Datacenter); err != nil {
-			return ctrl.Result{}, fmt.Errorf("target datacenter %q on %s not found: %w", fd.Topology.Datacenter, fd.Server, err)
-		}
-
-		// Validate compute cluster.
-		if _, err := session.Finder.ClusterComputeResource(ctx, fd.Topology.ComputeCluster); err != nil {
-			return ctrl.Result{}, fmt.Errorf("target cluster %q on %s not found: %w", fd.Topology.ComputeCluster, fd.Server, err)
-		}
-
-		// Validate datastore.
-		if _, err := session.Finder.Datastore(ctx, fd.Topology.Datastore); err != nil {
-			return ctrl.Result{}, fmt.Errorf("target datastore %q on %s not found: %w", fd.Topology.Datastore, fd.Server, err)
-		}
-
-		// Validate networks.
-		for _, net := range fd.Topology.Networks {
-			if _, err := session.Finder.Network(ctx, net); err != nil {
-				return ctrl.Result{}, fmt.Errorf("target network %q on %s not found: %w", net, fd.Server, err)
-			}
-		}
-
-		// Validate resource pool.
-		if fd.Topology.ResourcePool != "" {
-			if _, err := session.Finder.ResourcePool(ctx, fd.Topology.ResourcePool); err != nil {
-				return ctrl.Result{}, fmt.Errorf("target resource pool %q on %s not found: %w", fd.Topology.ResourcePool, fd.Server, err)
-			}
-		}
-
-		// Validate template (folder path).
-		if fd.Topology.Template != "" {
-			if _, err := session.Finder.VirtualMachine(ctx, fd.Topology.Template); err != nil {
-				return ctrl.Result{}, fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
-			}
-		}
-
-		log.V(1).Info("target failure domain validated", "name", fd.Name, "server", fd.Server)
-	}
-
-	// Disable CVO.
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Disabling Cluster Version Operator")
-	if err := disableCVO(ctx, r.KubeClient); err != nil {
-		return ctrl.Result{}, fmt.Errorf("disabling CVO: %w", err)
-	}
-
-	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Infrastructure prepared and CVO disabled")
-	r.Recorder.Event(migration, "Normal", "InfrastructurePrepared", "Preflight validation passed, CVO disabled")
+	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, message)
+	r.Recorder.Event(migration, "Normal", "InfrastructurePrepared", "Preflight validation passed")
 	return ctrl.Result{}, nil
 }
 
@@ -287,7 +184,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 
 	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Initializing destination vCenter")
 
-	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient, r.APIExtensionsClient)
+	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	infraID, err := infraMgr.GetInfrastructureID(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting infrastructure ID: %w", err)
@@ -377,27 +274,25 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMultiSiteConfigured(ctx
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionMultiSiteConfigured
 
-	currentMsg := ""
-	if cond := apimeta.FindStatusCondition(migration.Status.Conditions, condType); cond != nil {
-		currentMsg = cond.Message
+	configApplied, err := r.hasTargetVCenterConfiguration(ctx, migration)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-
-	// If we are already waiting for vSphere pods, only run the readiness check.
-	// Otherwise we would re-apply config and restart pods on every requeue, preventing pods from ever becoming ready.
-	waitingForPods := strings.HasPrefix(currentMsg, "Waiting for vSphere pods to become ready")
+	waitingForPods := false
+	if cond := apimeta.FindStatusCondition(migration.Status.Conditions, condType); cond != nil {
+		waitingForPods = configApplied && cond.Reason == reasonWaitingForVSpherePods
+	}
 
 	if !waitingForPods {
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Configuring multi-site vCenter")
 
 		sm := openshift.NewSecretManager(r.KubeClient)
 
-		// Get vsphere-creds secret and add target credentials.
 		credsSecret, err := sm.GetVSphereCredsSecret(ctx)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("getting vsphere-creds secret: %w", err)
 		}
 
-		// Track servers already processed to avoid duplicate updates.
 		processedServers := make(map[string]bool)
 		for i := range migration.Spec.FailureDomains {
 			fd := &migration.Spec.FailureDomains[i]
@@ -418,18 +313,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMultiSiteConfigured(ctx
 		}
 		log.V(1).Info("target vCenter credentials added to vsphere-creds")
 
-		// Update Infrastructure CRD with target vCenter and failure domains.
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Updating Infrastructure CRD")
-		infraMgr := openshift.NewInfrastructureManager(r.ConfigClient, r.APIExtensionsClient)
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Updating Infrastructure")
+		infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 		infra, err := infraMgr.Get(ctx)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("getting infrastructure: %w", err)
 		}
 
-		if _, err := infraMgr.AddTargetVCenterWithCRDModification(ctx, infra, migration.Spec.FailureDomains); err != nil {
+		if _, err := infraMgr.AddTargetVCenter(ctx, infra, migration.Spec.FailureDomains); err != nil {
 			return ctrl.Result{}, fmt.Errorf("adding target vCenter to infrastructure: %w", err)
 		}
-		log.V(1).Info("Infrastructure CRD updated with target vCenter")
+		log.V(1).Info("Infrastructure updated with target vCenter")
 
 		// Update cloud-provider-config.
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Updating cloud-provider-config")
@@ -458,12 +352,12 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMultiSiteConfigured(ctx
 		}
 
 		// Set message so next reconcile only runs readiness check.
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Waiting for vSphere pods to become ready")
+		r.setCondition(migration, condType, metav1.ConditionFalse, reasonWaitingForVSpherePods, "Waiting for vSphere pods to become ready")
 		// Fall through to readiness check below (no return).
 	}
 
 	podMgr := openshift.NewPodManager(r.KubeClient)
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Waiting for vSphere pods to become ready")
+	r.setCondition(migration, condType, metav1.ConditionFalse, reasonWaitingForVSpherePods, "Waiting for vSphere pods to become ready")
 	podStatus, err := podMgr.CheckVSpherePodsReady(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking vSphere pods readiness: %w", err)
@@ -503,7 +397,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 		}
 	}
 
-	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient, r.APIExtensionsClient)
+	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	infraID, err := infraMgr.GetInfrastructureID(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting infrastructure ID: %w", err)
@@ -604,7 +498,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRolloutAndScaleDown(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionWorkloadMigrated
-	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient, r.APIExtensionsClient)
+	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting source vCenter: %w", err)
@@ -684,38 +578,35 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 	return ctrl.Result{}, nil
 }
 
-// ensureSourceCleaned removes the source vCenter from all cluster configuration,
-// generates metadata, and re-enables the CVO.
+// ensureSourceCleaned removes the source vCenter from all cluster configuration
+// and generates metadata.
 func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionSourceCleaned
 
 	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Cleaning up source vCenter")
 
-	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient, r.APIExtensionsClient)
-	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
+	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
+	infra, err := infraMgr.Get(ctx)
 	if err != nil {
-		// Source may already have been removed on a previous attempt.
-		log.V(1).Info("source vCenter not found in infrastructure, may already be removed", "err", err)
+		return ctrl.Result{}, fmt.Errorf("getting infrastructure: %w", err)
 	}
 
 	var sourceServer string
-	if sourceVC != nil {
-		sourceServer = sourceVC.Server
+	if infra.Spec.PlatformSpec.VSphere != nil && len(infra.Spec.PlatformSpec.VSphere.VCenters) > 0 {
+		sourceServer = infra.Spec.PlatformSpec.VSphere.VCenters[0].Server
+	} else {
+		log.V(1).Info("source vCenter not found in infrastructure, already removed")
 	}
 
-	// Complete all vCenter list changes (Infrastructure, config, secrets, pods) before
-	// re-enabling CVO. CVO must not be re-enabled until the cluster config reflects
-	// only the target vCenter(s).
+	// Complete all vCenter list changes (Infrastructure, config, secrets, pods).
 	if sourceServer != "" {
-		// Remove source from Infrastructure CRD (requires temporary CRD modification;
-		// platform validation forbids adding/removing vCenters once set).
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source vCenter from Infrastructure CRD")
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source vCenter from Infrastructure")
 		infra, err := infraMgr.Get(ctx)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("getting infrastructure: %w", err)
 		}
-		if _, err := infraMgr.RemoveSourceVCenterWithCRDModification(ctx, infra, sourceServer); err != nil {
+		if _, err := infraMgr.RemoveSourceVCenter(ctx, infra, sourceServer); err != nil {
 			return ctrl.Result{}, fmt.Errorf("removing source vCenter from infrastructure: %w", err)
 		}
 		log.V(1).Info("removed source vCenter from infrastructure", "server", sourceServer)
@@ -756,7 +647,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 
 	// Generate metadata (after vCenter list is updated).
 	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Generating migration metadata")
-	infra, err := infraMgr.Get(ctx)
+	infra, err = infraMgr.Get(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting infrastructure for metadata: %w", err)
 	}
@@ -792,25 +683,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	}
 	log.V(1).Info("metadata saved", "secret", secretName)
 
-	// Re-enable CVO only after vCenter list and config have been updated (above).
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Re-enabling Cluster Version Operator")
-	if err := enableCVO(ctx, r.KubeClient); err != nil {
-		return ctrl.Result{}, fmt.Errorf("enabling CVO: %w", err)
-	}
-
-	// Wait for CVO to become ready.
-	ready, err := isCVOReady(ctx, r.KubeClient)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("checking CVO readiness: %w", err)
-	}
-	if !ready {
-		log.V(1).Info("CVO not yet ready, requeueing")
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Waiting for CVO to become ready")
-		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
-	}
-
-	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Source vCenter cleaned and CVO re-enabled")
-	r.Recorder.Event(migration, "Normal", "SourceCleaned", "Source vCenter removed from cluster configuration, CVO re-enabled")
+	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Source vCenter cleaned")
+	r.Recorder.Event(migration, "Normal", "SourceCleaned", "Source vCenter removed from cluster configuration")
 	return ctrl.Result{}, nil
 }
 
@@ -836,7 +710,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 	}
 
 	// Verify only target vCenters remain in Infrastructure.
-	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient, r.APIExtensionsClient)
+	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	infra, err := infraMgr.Get(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting infrastructure for readiness check: %w", err)
