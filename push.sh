@@ -1,4 +1,3 @@
-
 #!/bin/bash
 export KUBECONFIG=${HOME}/Development/before-installer-testing/vsphere-ipi/auth/kubeconfig
 
