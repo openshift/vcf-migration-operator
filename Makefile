@@ -10,6 +10,7 @@ VERSION ?= 0.0.1
 # To re-generate a bundle for other specific channels without changing the standard setup, you can:
 # - use the CHANNELS as arg of the bundle target (e.g make bundle CHANNELS=candidate,fast,stable)
 # - use environment variables to overwrite this value (e.g export CHANNELS="candidate,fast,stable")
+CHANNELS ?= dev-preview
 ifneq ($(origin CHANNELS), undefined)
 BUNDLE_CHANNELS := --channels=$(CHANNELS)
 endif
@@ -19,6 +20,7 @@ endif
 # To re-generate a bundle for any other default channel without changing the default setup, you can:
 # - use the DEFAULT_CHANNEL as arg of the bundle target (e.g make bundle DEFAULT_CHANNEL=stable)
 # - use environment variables to overwrite this value (e.g export DEFAULT_CHANNEL="stable")
+DEFAULT_CHANNEL ?= dev-preview
 ifneq ($(origin DEFAULT_CHANNEL), undefined)
 BUNDLE_DEFAULT_CHANNEL := --default-channel=$(DEFAULT_CHANNEL)
 endif
@@ -28,8 +30,8 @@ BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
 # This variable is used to construct full image tags for bundle and catalog images.
 #
 # For example, running 'make bundle-build bundle-push catalog-build catalog-push' will build and push both
-# openshift.io/vcf-migration-operator-bundle:$VERSION and openshift.io/vcf-migration-operator-catalog:$VERSION.
-IMAGE_TAG_BASE ?= openshift.io/vcf-migration-operator
+# registry.ci.openshift.org/origin/vcf-migration-operator-bundle:$VERSION and registry.ci.openshift.org/origin/vcf-migration-operator-catalog:$VERSION.
+IMAGE_TAG_BASE ?= registry.ci.openshift.org/origin/vcf-migration-operator
 
 # BUNDLE_IMG defines the image:tag used for the bundle.
 # You can use it as an arg. (E.g make bundle-build BUNDLE_IMG=<some-registry>/<project-name-bundle>:<tag>)
@@ -50,7 +52,7 @@ endif
 # This is useful for CI or a project to utilize a specific version of the operator-sdk toolkit.
 OPERATOR_SDK_VERSION ?= v1.42.0
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+IMG ?= $(IMAGE_TAG_BASE):latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -314,6 +316,43 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
 	$(OPERATOR_SDK) bundle validate ./bundle
+	VERSION=$(VERSION) hack/patch-bundle-dockerfile.sh
+
+.PHONY: bundle-verify
+bundle-verify: ## Verify that 'make bundle' was run and the bundle is up-to-date
+	@echo "#############################################"
+	@echo "####### Preparing to verify the bundle ######"
+	@echo "#############################################"
+	@# Save the createdAt timestamp to preserve it across bundle regeneration
+	@rm -f *.clusterserviceversion.yaml.created-at
+	@if grep -rl 'createdAt:' bundle/manifests 2>/dev/null; then \
+		grep -rl 'createdAt:' bundle/manifests | xargs -I {} sh -c 'grep "createdAt:" {} | cut -d\" -f2 > $$(basename {}).created-at'; \
+	fi
+	@echo "######################################################"
+	@echo "###### Run the creation of the bundle manifests ######"
+	@echo "######################################################"
+	@$(MAKE) bundle
+	@echo "##########################################################################################################"
+	@echo "###### Restoring the createdAt timestamp in the bundle/manifests/*.clusterserviceversion.yaml files ######"
+	@echo "##########################################################################################################"
+	@# Restore the createdAt timestamp in the CSV files
+	@for file in *.clusterserviceversion.yaml.created-at; do \
+		[ -e "$${file}" ] || break; \
+		created_at=$$(cat $${file}); \
+		sed -i "s/createdAt: .*/createdAt: \"$${created_at}\"/" bundle/manifests/$${file%.created-at}; \
+	done
+	@rm -f ./*.clusterserviceversion.yaml.created-at
+	@echo "################################################################################################"
+	@echo "#### Verifying no other files changed in the working tree after the bundle generation test ####"
+	@echo "################################################################################################"
+	@$(MAKE) verify-diff
+	@echo "########################################################################"
+	@echo "#### ✓ Bundle verification successful - bundle is up to date! ####"
+	@echo "########################################################################"
+
+.PHONY: verify-diff
+verify-diff: ## Verify that no files have changed in the versioned working tree
+	@hack/verify-diff.sh
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.
