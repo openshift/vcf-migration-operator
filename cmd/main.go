@@ -28,7 +28,6 @@ import (
 
 	configclient "github.com/openshift/client-go/config/clientset/versioned"
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
-	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
@@ -233,21 +232,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	apiextClient, err := apiextensionsclient.NewForConfig(restConfig)
-	if err != nil {
-		setupLog.Error(err, "unable to create apiextensions client")
-		os.Exit(1)
-	}
-
 	if err := (&controller.VmwareCloudFoundationMigrationReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		KubeClient:          kubeClient,
-		ConfigClient:        cfgClient,
-		MachineClient:       machClient,
-		DynamicClient:       dynClient,
-		APIExtensionsClient: apiextClient,
-		Recorder:            mgr.GetEventRecorderFor("vcf-migration-controller"),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		KubeClient:    kubeClient,
+		ConfigClient:  cfgClient,
+		MachineClient: machClient,
+		DynamicClient: dynClient,
+		Recorder:      mgr.GetEventRecorderFor("vcf-migration-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VmwareCloudFoundationMigration")
 		os.Exit(1)
