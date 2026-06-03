@@ -709,8 +709,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 		creds[fd.Server] = fmt.Sprintf("%s:%s", username, password)
 	}
 
+	featureSet, customFeatureSet, err := openshift.GetFeatureSet(ctx, r.ConfigClient)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("getting feature set for metadata: %w", err)
+	}
+
 	metadataMgr := metadata.NewMetadataManager(r.KubeClient)
-	md, err := metadataMgr.GenerateMetadata(ctx, migration.Spec.FailureDomains, infra, creds)
+	md, err := metadataMgr.GenerateMetadata(ctx, migration.Spec.FailureDomains, infra, creds, featureSet, customFeatureSet)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("generating metadata: %w", err)
 	}

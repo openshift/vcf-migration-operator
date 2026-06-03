@@ -2,6 +2,7 @@ package openshift
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -229,6 +230,94 @@ func TestIsClusterVersionProgressing(t *testing.T) {
 	}
 }
 
+func TestGetFeatureSet(t *testing.T) {
+	customSource := &configv1.CustomFeatureGates{
+		Enabled:  []configv1.FeatureGateName{"ExampleOn"},
+		Disabled: []configv1.FeatureGateName{"ExampleOff"},
+	}
+	emptyCustomSource := &configv1.CustomFeatureGates{
+		Enabled:  []configv1.FeatureGateName{},
+		Disabled: []configv1.FeatureGateName{},
+	}
+
+	tests := []struct {
+		name         string
+		client       func() configclient.Interface
+		sourceCustom *configv1.CustomFeatureGates
+		wantSet      configv1.FeatureSet
+		wantCustom   *configv1.CustomFeatureGates
+		wantErr      bool
+	}{
+		{
+			name: "returns default feature set",
+			client: func() configclient.Interface {
+				return fakeconfigclient.NewClientset(newFeatureGateWithSpec(configv1.FeatureSet(""), nil))
+			},
+			wantSet:    configv1.FeatureSet(""),
+			wantCustom: nil,
+		},
+		{
+			name: "returns custom no upgrade feature set",
+			client: func() configclient.Interface {
+				return fakeconfigclient.NewClientset(newFeatureGateWithSpec(configv1.CustomNoUpgrade, customSource))
+			},
+			sourceCustom: customSource,
+			wantSet:      configv1.CustomNoUpgrade,
+			wantCustom: &configv1.CustomFeatureGates{
+				Enabled:  []configv1.FeatureGateName{"ExampleOn"},
+				Disabled: []configv1.FeatureGateName{"ExampleOff"},
+			},
+		},
+		{
+			name: "preserves non nil empty custom feature gate slices",
+			client: func() configclient.Interface {
+				return fakeconfigclient.NewClientset(newFeatureGateWithSpec(configv1.CustomNoUpgrade, emptyCustomSource))
+			},
+			sourceCustom: emptyCustomSource,
+			wantSet:      configv1.CustomNoUpgrade,
+			wantCustom: &configv1.CustomFeatureGates{
+				Enabled:  []configv1.FeatureGateName{},
+				Disabled: []configv1.FeatureGateName{},
+			},
+		},
+		{
+			name: "fails when feature gate missing",
+			client: func() configclient.Interface {
+				return fakeconfigclient.NewClientset()
+			},
+			wantErr: true,
+		},
+		{
+			name: "fails when client is nil",
+			client: func() configclient.Interface {
+				return nil
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotSet, gotCustom, err := GetFeatureSet(context.Background(), tt.client())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GetFeatureSet error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if gotSet != tt.wantSet {
+				t.Fatalf("FeatureSet = %q, want %q", gotSet, tt.wantSet)
+			}
+			if tt.sourceCustom != nil && gotCustom == tt.sourceCustom {
+				t.Fatalf("GetFeatureSet returned source custom gates pointer %p; want defensive clone", gotCustom)
+			}
+			if !reflect.DeepEqual(gotCustom, tt.wantCustom) {
+				t.Fatalf("CustomFeatureGates = %#v, want %#v", gotCustom, tt.wantCustom)
+			}
+		})
+	}
+}
+
 func newFeatureGateForVersion(version string, enabled bool) *configv1.FeatureGate {
 	details := configv1.FeatureGateDetails{Version: version}
 	if enabled {
@@ -241,6 +330,18 @@ func newFeatureGateForVersion(version string, enabled bool) *configv1.FeatureGat
 		ObjectMeta: metav1.ObjectMeta{Name: featureGateName},
 		Status: configv1.FeatureGateStatus{
 			FeatureGates: []configv1.FeatureGateDetails{details},
+		},
+	}
+}
+
+func newFeatureGateWithSpec(featureSet configv1.FeatureSet, custom *configv1.CustomFeatureGates) *configv1.FeatureGate {
+	return &configv1.FeatureGate{
+		ObjectMeta: metav1.ObjectMeta{Name: featureGateName},
+		Spec: configv1.FeatureGateSpec{
+			FeatureGateSelection: configv1.FeatureGateSelection{
+				FeatureSet:      featureSet,
+				CustomNoUpgrade: custom,
+			},
 		},
 	}
 }
