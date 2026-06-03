@@ -58,6 +58,26 @@ func GetVSphereMultiVCenterSupport(ctx context.Context, client configclient.Inte
 	}, nil
 }
 
+// GetFeatureSet returns the cluster feature set and custom feature gates from
+// FeatureGate/cluster.
+func GetFeatureSet(ctx context.Context, client configclient.Interface) (configv1.FeatureSet, *configv1.CustomFeatureGates, error) {
+	if client == nil {
+		return "", nil, fmt.Errorf("GetFeatureSet client must not be nil")
+	}
+
+	featureGate, err := client.ConfigV1().FeatureGates().Get(ctx, featureGateName, metav1.GetOptions{})
+	if err != nil {
+		return "", nil, fmt.Errorf("getting featuregate %q: %w", featureGateName, err)
+	}
+
+	featureSet := featureGate.Spec.FeatureSet
+	if featureSet != configv1.CustomNoUpgrade {
+		return featureSet, nil, nil
+	}
+
+	return featureSet, cloneCustomFeatureGates(featureGate.Spec.CustomNoUpgrade), nil
+}
+
 func isFeatureGateEnabledForVersion(featureGate *configv1.FeatureGate, version string, gateName configv1.FeatureGateName) (bool, error) {
 	if featureGate == nil {
 		return false, fmt.Errorf("featuregate must not be nil")
@@ -91,4 +111,20 @@ func isClusterVersionProgressing(clusterVersion *configv1.ClusterVersion) bool {
 	}
 
 	return false
+}
+
+func cloneCustomFeatureGates(in *configv1.CustomFeatureGates) *configv1.CustomFeatureGates {
+	if in == nil {
+		return nil
+	}
+
+	out := &configv1.CustomFeatureGates{}
+	if in.Enabled != nil {
+		out.Enabled = append([]configv1.FeatureGateName{}, in.Enabled...)
+	}
+	if in.Disabled != nil {
+		out.Disabled = append([]configv1.FeatureGateName{}, in.Disabled...)
+	}
+
+	return out
 }
