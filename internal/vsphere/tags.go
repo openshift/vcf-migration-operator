@@ -24,12 +24,69 @@ const (
 
 	// TagCategoryZoneDescription describes the zone tag category.
 	TagCategoryZoneDescription = "OpenShift zone for failure domain topology"
+
+	// datacenterType is the vSphere associable type name for datacenters.
+	datacenterType = "Datacenter"
+	// clusterComputeResourceType is the vSphere associable type name for clusters.
+	clusterComputeResourceType = "ClusterComputeResource"
+	// datastoreType is the vSphere associable type name for datastores.
+	datastoreType = "Datastore"
+	// folderType is the vSphere associable type name for folders.
+	folderType = "Folder"
+)
+
+var (
+	tagCategoryAssociableTypes = []string{
+		datacenterType,
+		clusterComputeResourceType,
+		datastoreType,
+		folderType,
+	}
+	requiredTagCategoryAssociableTypes = []string{
+		datacenterType,
+		clusterComputeResourceType,
+	}
 )
 
 // isAlreadyExists returns true if the error indicates the resource already exists
 // (e.g. vSphere API returns already_exists).
 func isAlreadyExists(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "already_exists")
+}
+
+func validateExistingCategory(category *tags.Category, name, cardinality string) error {
+	var incompatibilities []string
+
+	if category.Cardinality != cardinality {
+		incompatibilities = append(incompatibilities, fmt.Sprintf("cardinality %q does not match required %q", category.Cardinality, cardinality))
+	}
+
+	missingTypes := missingAssociableTypes(category.AssociableTypes, requiredTagCategoryAssociableTypes)
+	if len(missingTypes) > 0 {
+		incompatibilities = append(incompatibilities, fmt.Sprintf("missing required associable types %s", strings.Join(missingTypes, ", ")))
+	}
+
+	if len(incompatibilities) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("existing tag category %q is incompatible: %s; update the category in the vSphere UI or delete it and let the operator recreate it", name, strings.Join(incompatibilities, "; "))
+}
+
+func missingAssociableTypes(existingTypes, requiredTypes []string) []string {
+	existing := make(map[string]struct{}, len(existingTypes))
+	for _, associableType := range existingTypes {
+		existing[associableType] = struct{}{}
+	}
+
+	missing := make([]string, 0, len(requiredTypes))
+	for _, requiredType := range requiredTypes {
+		if _, ok := existing[requiredType]; !ok {
+			missing = append(missing, requiredType)
+		}
+	}
+
+	return missing
 }
 
 // EnsureTagCategory returns the vSphere tag category ID for the given name,
@@ -45,20 +102,18 @@ func EnsureTagCategory(ctx context.Context, s *Session, name, description, cardi
 
 	existing, err := s.TagManager.GetCategory(ctx, name)
 	if err == nil && existing != nil && existing.ID != "" {
+		if err := validateExistingCategory(existing, name, cardinality); err != nil {
+			return "", err
+		}
 		log.V(2).Info("using existing tag category", "name", name, "id", existing.ID)
 		return existing.ID, nil
 	}
 
 	cat := tags.Category{
-		Name:        name,
-		Description: description,
-		Cardinality: cardinality,
-		AssociableTypes: []string{
-			"Datacenter",
-			"ClusterComputeResource",
-			"Datastore",
-			"Folder",
-		},
+		Name:            name,
+		Description:     description,
+		Cardinality:     cardinality,
+		AssociableTypes: tagCategoryAssociableTypes,
 	}
 
 	id, err := s.TagManager.CreateCategory(ctx, &cat)
@@ -67,6 +122,9 @@ func EnsureTagCategory(ctx context.Context, s *Session, name, description, cardi
 			existing, getErr := s.TagManager.GetCategory(ctx, name)
 			if getErr != nil {
 				return "", fmt.Errorf("creating tag category %q (already exists but get failed): %w", name, getErr)
+			}
+			if err := validateExistingCategory(existing, name, cardinality); err != nil {
+				return "", err
 			}
 			log.V(2).Info("tag category already existed, using existing", "name", name, "id", existing.ID)
 			return existing.ID, nil
@@ -116,19 +174,31 @@ func EnsureTag(ctx context.Context, s *Session, categoryID, name, description st
 	return id, nil
 }
 
-// AttachTag attaches a vSphere tag to the given managed object reference.
-func AttachTag(ctx context.Context, s *Session, tagID string, obj object.Reference) error {
+// AttachTag attaches a vSphere tag to the given managed object reference. It
+// returns true when the tag was newly attached, and false when the attachment
+// already existed or no tag ID was provided.
+func AttachTag(ctx context.Context, s *Session, tagID string, obj object.Reference) (bool, error) {
 	if obj == nil {
-		return fmt.Errorf("cannot attach tag: object reference is nil")
+		return false, fmt.Errorf("cannot attach tag: object reference is nil")
+	}
+	if tagID == "" {
+		return false, nil
+	}
+	if s == nil || s.TagManager == nil {
+		return false, fmt.Errorf("session and TagManager must not be nil")
 	}
 	log := klog.FromContext(ctx)
 	ref := obj.Reference()
 	log.V(2).Info("attaching tag", "tagID", tagID, "object", ref)
 
 	if err := s.TagManager.AttachTag(ctx, tagID, ref); err != nil {
-		return fmt.Errorf("attaching tag %s to %s: %w", tagID, ref, err)
+		if isAlreadyExists(err) {
+			log.V(2).Info("tag already attached", "tagID", tagID, "object", ref)
+			return false, nil
+		}
+		return false, fmt.Errorf("attaching tag %s to %s: %w", tagID, ref, err)
 	}
-	return nil
+	return true, nil
 }
 
 // CreateRegionAndZoneTags ensures the OpenShift region and zone tag categories
@@ -181,13 +251,29 @@ func AttachFailureDomainTags(ctx context.Context, s *Session, regionTagID, zoneT
 	)
 
 	ref := datacenter.Reference()
-	if err := s.TagManager.AttachTag(ctx, regionTagID, ref); err != nil {
-		return fmt.Errorf("attaching region tag to datacenter %s: %w", ref, err)
+	if regionTagID != "" {
+		attached, err := AttachTag(ctx, s, regionTagID, datacenter)
+		if err != nil {
+			return fmt.Errorf("attaching region tag to datacenter %s: %w", ref, err)
+		}
+		if attached {
+			log.V(1).Info("ensured region tag attached to datacenter", "regionTagID", regionTagID, "datacenter", ref)
+		} else {
+			log.V(1).Info("region tag already attached to datacenter", "regionTagID", regionTagID, "datacenter", ref)
+		}
 	}
 
 	clusterRef := cluster.Reference()
-	if err := s.TagManager.AttachTag(ctx, zoneTagID, clusterRef); err != nil {
-		return fmt.Errorf("attaching zone tag to cluster %s: %w", clusterRef, err)
+	if zoneTagID != "" {
+		attached, err := AttachTag(ctx, s, zoneTagID, cluster)
+		if err != nil {
+			return fmt.Errorf("attaching zone tag to cluster %s: %w", clusterRef, err)
+		}
+		if attached {
+			log.V(1).Info("ensured zone tag attached to cluster", "zoneTagID", zoneTagID, "cluster", clusterRef)
+		} else {
+			log.V(1).Info("zone tag already attached to cluster", "zoneTagID", zoneTagID, "cluster", clusterRef)
+		}
 	}
 
 	return nil

@@ -10,6 +10,19 @@ vcf-migration-operator automates moving an OpenShift cluster from a source vCent
 
 - **OpenShift Console Plugin**: A dynamic plugin that adds a "VCF Migration" section to the OpenShift console (Administrator perspective). It provides a list of migrations, a create wizard (credentials + vCenter browse for failure domains), and a detail view with condition progress, live event stream (SSE), and machine topology. The plugin backend is a Go HTTP server that serves the webpack-built frontend and exposes API routes for vCenter inventory browsing and event streaming; the UI uses the console SDK for all Kubernetes CRUD and watch operations.
 
+## Destination Topology Tags
+
+During the `DestinationInitialized` phase, after preflight confirms the target vCenter user has the required tagging privileges, the operator creates the shared OpenShift topology tag model on the destination vCenter:
+
+- The `openshift-region` and `openshift-zone` categories are created with `SINGLE` cardinality.
+- New categories are created with associable types `Datacenter`, `ClusterComputeResource`, `Datastore`, and `Folder`.
+- The region tag from `failureDomain.region` is attached to the target datacenter.
+- The zone tag from `failureDomain.zone` is attached to the target compute cluster.
+- Multiple failure domains can share the same region while using different zones.
+- This mirrors the topology tag model used by the OpenShift vSphere cloud provider and CSI driver to discover failure domains.
+
+The category ownership model is intentionally shared per vCenter rather than cluster-specific. If `openshift-region` or `openshift-zone` already exists, the operator reuses it and never deletes or rewrites it. Brownfield reuse is validated before proceeding: the category must keep `SINGLE` cardinality and must allow at least `Datacenter` and `ClusterComputeResource`. Extra associable types and different descriptions are tolerated. If an existing category is incompatible, the operator fails with an error that tells the administrator to update the category in the vSphere UI or delete it and let the operator recreate it.
+
 ## Getting Started
 
 ### Prerequisites

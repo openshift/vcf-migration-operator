@@ -48,10 +48,10 @@ import (
 // progressing through a series of conditions in order.
 type VmwareCloudFoundationMigrationReconciler struct {
 	client.Client
-	Scheme              *runtime.Scheme
-	KubeClient          kubernetes.Interface
-	ConfigClient        configclient.Interface
-	MachineClient       machineclient.Interface
+	Scheme        *runtime.Scheme
+	KubeClient    kubernetes.Interface
+	ConfigClient  configclient.Interface
+	MachineClient machineclient.Interface
 	DynamicClient dynamic.Interface
 	Recorder      record.EventRecorder
 }
@@ -195,10 +195,28 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 		server, datacenter string
 	}
 	folderCreated := make(map[serverDC]bool)
+	type tagTarget struct {
+		server, datacenter, objectType, objectName, tagValue string
+	}
+	tagAttached := make(map[tagTarget]bool)
 
 	for i := range migration.Spec.FailureDomains {
 		fd := &migration.Spec.FailureDomains[i]
 		key := serverDC{server: fd.Server, datacenter: fd.Topology.Datacenter}
+		regionAttachmentKey := tagTarget{
+			server:     fd.Server,
+			datacenter: fd.Topology.Datacenter,
+			objectType: "datacenter",
+			objectName: fd.Topology.Datacenter,
+			tagValue:   fd.Region,
+		}
+		zoneAttachmentKey := tagTarget{
+			server:     fd.Server,
+			datacenter: fd.Topology.Datacenter,
+			objectType: "cluster",
+			objectName: fd.Topology.ComputeCluster,
+			tagValue:   fd.Zone,
+		}
 
 		username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
 		if err != nil {
@@ -243,6 +261,20 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 			return ctrl.Result{}, fmt.Errorf("creating tags for failure domain %q: %w", fd.Name, err)
 		}
 
+		regionTagToAttach := regionTagID
+		if tagAttached[regionAttachmentKey] {
+			regionTagToAttach = ""
+		}
+		zoneTagToAttach := zoneTagID
+		if tagAttached[zoneAttachmentKey] {
+			zoneTagToAttach = ""
+		}
+		if regionTagToAttach == "" && zoneTagToAttach == "" {
+			log.V(2).Info("skipping duplicate failure domain tag attachment", "name", fd.Name, "server", fd.Server)
+			log.V(1).Info("failure domain initialized", "name", fd.Name)
+			continue
+		}
+
 		// Attach tags to datacenter and cluster.
 		dc, err := session.Finder.Datacenter(ctx, fd.Topology.Datacenter)
 		if err != nil {
@@ -254,8 +286,14 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 			return ctrl.Result{}, fmt.Errorf("finding cluster %q for tag attachment: %w", fd.Topology.ComputeCluster, err)
 		}
 
-		if err := vsphere.AttachFailureDomainTags(ctx, session, regionTagID, zoneTagID, dc, cluster); err != nil {
+		if err := vsphere.AttachFailureDomainTags(ctx, session, regionTagToAttach, zoneTagToAttach, dc, cluster); err != nil {
 			return ctrl.Result{}, fmt.Errorf("attaching tags for failure domain %q: %w", fd.Name, err)
+		}
+		if regionTagToAttach != "" {
+			tagAttached[regionAttachmentKey] = true
+		}
+		if zoneTagToAttach != "" {
+			tagAttached[zoneAttachmentKey] = true
 		}
 
 		log.V(1).Info("failure domain initialized", "name", fd.Name)
