@@ -16,7 +16,10 @@ import (
 // MetadataKey is the key used to store the metadata JSON in the Secret.
 const MetadataKey = "metadata.json"
 
-const metadataSecretLabelKey = "migration.openshift.io/metadata"
+const (
+	metadataSecretLabelKey   = "migration.openshift.io/metadata"
+	metadataSecretLabelValue = "true"
+)
 
 // ClusterMetadata describes the installer-compatible metadata.json stored in the
 // migration metadata Secret.
@@ -86,8 +89,6 @@ func (m *MetadataManager) GenerateMetadata(
 	failureDomains []configv1.VSpherePlatformFailureDomainSpec,
 	infra *configv1.Infrastructure,
 	credentials map[string]string,
-	featureSet configv1.FeatureSet,
-	customFeatureSet *configv1.CustomFeatureGates,
 ) (*ClusterMetadata, error) {
 	log := klog.FromContext(ctx)
 	log.V(2).Info("generating installer metadata")
@@ -106,9 +107,8 @@ func (m *MetadataManager) GenerateMetadata(
 		ClusterName: infra.Name,
 		ClusterID:   string(infra.UID),
 		InfraID:     infra.Status.InfrastructureName,
-		FeatureSet:  featureSet,
-		// GetFeatureSet already returns a defensive copy for CustomNoUpgrade.
-		CustomFeatureSet: customFeatureSet,
+		// Runtime feature-gate decisions use the standard accessor pattern; the
+		// installer-compatible fields remain at their zero values here.
 		VSphere: &VSphereMetadata{
 			TerraformPlatform: "vsphere",
 		},
@@ -176,7 +176,7 @@ func (m *MetadataManager) SaveToSecret(ctx context.Context, md *ClusterMetadata,
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				metadataSecretLabelKey: "true",
+				metadataSecretLabelKey: metadataSecretLabelValue,
 			},
 			OwnerReferences: nil,
 		},
@@ -192,7 +192,7 @@ func (m *MetadataManager) SaveToSecret(ctx context.Context, md *ClusterMetadata,
 		if existing.Labels == nil {
 			existing.Labels = map[string]string{}
 		}
-		existing.Labels[metadataSecretLabelKey] = "true"
+		existing.Labels[metadataSecretLabelKey] = metadataSecretLabelValue
 		existing.Data = secret.Data
 		existing.Type = corev1.SecretTypeOpaque
 		if _, err := m.kubeClient.CoreV1().Secrets(namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
