@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net/url"
 	"reflect"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	configv1 "github.com/openshift/api/config/v1"
 	configfake "github.com/openshift/client-go/config/clientset/versioned/fake"
+	"github.com/openshift/library-go/pkg/operator/configobserver/featuregates"
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/simulator"
@@ -336,8 +338,8 @@ func TestRunPreflightChecks(t *testing.T) {
 	tests := []struct {
 		name                      string
 		version                   string
-		gateVersion               string // defaults to version if empty
 		gateEnabled               bool
+		featureGateReadErr        string
 		progressing               bool
 		pvs                       []runtime.Object
 		dynamicObjects            []runtime.Object
@@ -431,10 +433,10 @@ func TestRunPreflightChecks(t *testing.T) {
 			wantTargetSecretReadCount: 2,
 		},
 		{
-			name:                      "feature gate version mismatch surfaces error",
+			name:                      "feature gate accessor read error surfaces error",
 			version:                   "5.0.0",
-			gateVersion:               "4.19.0",
 			gateEnabled:               true,
+			featureGateReadErr:        "boom",
 			wantErrContains:           "checking cluster readiness",
 			wantTargetSecretReadCount: 1,
 		},
@@ -464,14 +466,9 @@ func TestRunPreflightChecks(t *testing.T) {
 				return false, nil, nil
 			})
 
-			gateVersion := tt.version
-			if tt.gateVersion != "" {
-				gateVersion = tt.gateVersion
-			}
 			configObjects := []runtime.Object{
 				newInfrastructureForPreflight(server.URL.Host, inventory.datacenterName),
 				newClusterVersionForPreflight(tt.version, tt.progressing),
-				newFeatureGateForPreflight(gateVersion, tt.gateEnabled),
 			}
 			configObjects = append(configObjects, tt.extraConfigObjects...)
 			configClient := configfake.NewClientset(configObjects...)
@@ -479,10 +476,25 @@ func TestRunPreflightChecks(t *testing.T) {
 			scheme := runtime.NewScheme()
 			dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, preflightListKinds(), tt.dynamicObjects...)
 
+			enabledGates := []configv1.FeatureGateName{}
+			disabledGates := []configv1.FeatureGateName{}
+			if tt.gateEnabled {
+				enabledGates = append(enabledGates, configv1.FeatureGateName("VSphereMultiVCenterDay2"))
+			} else {
+				disabledGates = append(disabledGates, configv1.FeatureGateName("VSphereMultiVCenterDay2"))
+			}
+			featureGateAccessor := featuregates.NewHardcodedFeatureGateAccess(enabledGates, disabledGates)
+			if tt.featureGateReadErr != "" {
+				initialObserved := make(chan struct{})
+				close(initialObserved)
+				featureGateAccessor = featuregates.NewHardcodedFeatureGateAccessForTesting(enabledGates, disabledGates, initialObserved, errors.New(tt.featureGateReadErr))
+			}
+
 			reconciler := &VmwareCloudFoundationMigrationReconciler{
-				KubeClient:    kubeClient,
-				ConfigClient:  configClient,
-				DynamicClient: dynamicClient,
+				KubeClient:          kubeClient,
+				ConfigClient:        configClient,
+				FeatureGateAccessor: featureGateAccessor,
+				DynamicClient:       dynamicClient,
 			}
 
 			migration := newMigrationForPreflight(server.URL.Host, inventory)
@@ -805,20 +817,4 @@ func newClusterVersionForPreflight(version string, progressing bool) *configv1.C
 		})
 	}
 	return clusterVersion
-}
-
-func newFeatureGateForPreflight(version string, enabled bool) *configv1.FeatureGate {
-	details := configv1.FeatureGateDetails{Version: version}
-	if enabled {
-		details.Enabled = []configv1.FeatureGateAttributes{
-			{Name: configv1.FeatureGateName("VSphereMultiVCenterDay2")},
-		}
-	}
-
-	return &configv1.FeatureGate{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
-		Status: configv1.FeatureGateStatus{
-			FeatureGates: []configv1.FeatureGateDetails{details},
-		},
-	}
 }

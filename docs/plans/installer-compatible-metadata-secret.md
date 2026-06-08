@@ -69,32 +69,32 @@ Remove the old `Metadata` and `VCenters` types entirely. Remove topology fields 
 
 ### 2. Update `GenerateMetadata` signature and implementation
 
-Change `GenerateMetadata` to accept `featureSet configv1.FeatureSet` and `customFeatureSet *configv1.CustomFeatureGates` parameters.
-
 Updated logic:
-- Populate `ClusterMetadata.FeatureSet` and `ClusterMetadata.CustomFeatureSet` from the parameters.
 - Build `VSphereMetadata` from failure domains and credentials:
   - Set legacy root fields (`VCenter`, `Username`, `Password`) from the first failure domain (matches installer behavior).
   - Set `TerraformPlatform` to `"vsphere"`.
   - Build `VCenters` array with one entry per **unique server** (deduplicate across failure domains that share the same vCenter).
 - **Fail-fast on missing or malformed credentials.** If `parseCredentials` returns empty username or password for any server, return an error immediately rather than serializing blank values into the Secret. This surfaces misconfiguration at reconciliation time instead of deferring failure to the destroy path.
+- Leave `ClusterMetadata.FeatureSet` as `""` and `ClusterMetadata.CustomFeatureSet` as `nil`. These fields remain in the JSON payload for installer compatibility, but VMO does not snapshot cluster feature-set configuration into the metadata Secret.
 - Return `*ClusterMetadata` instead of `*Metadata`.
 
 **Known limitation — `clusterName`:** The installer populates `ClusterName` from `InstallConfig.Config.ObjectMeta.Name` (the user-chosen cluster name), which is not stored on a running cluster. The operator uses `infra.Name`, which is always `"cluster"` (the singleton Infrastructure object name). The vSphere destroyer does not read `ClusterName` — only IBMCloud and PowerVS destroyers use it — so this is cosmetically wrong but functionally harmless for vSphere destroy compatibility.
 
-### 3. Add `GetFeatureSet` helper to `internal/openshift/version.go`
+### 3. Use the standard feature-gate accessor for runtime checks
 
-Add a function that reads the `FeatureGate` resource (`featuregate/cluster`) and returns both `featureSet` and `customNoUpgrade`. On a running cluster the canonical source for feature set configuration is `FeatureGate.Spec.FeatureSet`. The existing `GetVSphereMultiVCenterSupport` already reads this resource for gate detection, so this reuses the same API path.
+Follow the standard `library-go` feature-gate accessor pattern called out in the CCO review. Runtime checks should consume `featuregates.FeatureGateAccess` instead of ad hoc reads of the `FeatureGate` resource.
 
-```go
-func GetFeatureSet(ctx context.Context, client configclient.Interface) (configv1.FeatureSet, *configv1.CustomFeatureGates, error)
-```
+Implementation notes:
+- Initialize `FeatureGateAccess` in `cmd/main.go`.
+- Start its informers and wait for initial feature-gate observation before wiring the reconciler.
+- Keep the default change-handler behavior so the operator restarts if the effective feature-gate set changes.
+- Update `GetVSphereMultiVCenterSupport()` to read the effective gates from the accessor while still using `ClusterVersion` for release and upgrade status.
 
-When `FeatureSet == CustomNoUpgrade`, populate `CustomFeatureGates` from `FeatureGate.Spec.CustomNoUpgrade`. Otherwise return nil for the custom gates. The controller will call this during the `ConditionSourceCleaned` phase alongside credential collection.
+### 4. Update controller wiring
 
-### 4. Update controller to pass `featureSet` and `customFeatureSet` to `GenerateMetadata`
-
-In `ensureSourceCleaned()` at `internal/controller/vmwarecloudfoundationmigration_controller.go:648-684`, add a call to `GetFeatureSet()` and pass both return values (`featureSet`, `customFeatureSet`) to `GenerateMetadata()`.
+- Inject `FeatureGateAccess` into `VmwareCloudFoundationMigrationReconciler`.
+- Use it from preflight/runtime gate checks.
+- Stop reading `FeatureGate.Spec.FeatureSet` during `ensureSourceCleaned()` metadata generation.
 
 ### 5. Update `SaveToSecret` to accept `*ClusterMetadata`
 
@@ -123,10 +123,11 @@ This serves as a contract test — if someone changes a JSON tag, this test brea
 
 ### 8. Update existing tests
 
-- `TestGenerateMetadata`: Update struct literals and assertions to use `ClusterMetadata`/`VSphereMetadata`/`VCenter` types. Add `featureSet` and `customFeatureSet` parameters. Assert `md.VSphere.VCenter` instead of `md.VCenter`. Assert `md.VSphere.TerraformPlatform`.
+- `TestGenerateMetadata`: Update struct literals and assertions to use `ClusterMetadata`/`VSphereMetadata`/`VCenter` types. Assert `md.VSphere.VCenter` instead of `md.VCenter`. Assert `md.VSphere.TerraformPlatform`.
+- Assert `FeatureSet == ""` and `CustomFeatureSet == nil` for generated metadata.
 - `TestSaveToSecretAndGet`: Update `Metadata{}` literal to `ClusterMetadata{}` with nested `VSphere` field. Assert labels are re-applied on update.
 - Add deduplication test: two failure domains with the same server should produce one `VCenters` entry.
-- Add `featureSet` and `customFeatureSet` round-trip test (including `CustomNoUpgrade` case).
+- Keep a round-trip test for explicit `featureSet`/`customFeatureSet` values on manually-constructed `ClusterMetadata` objects so JSON compatibility stays covered.
 
 ### 9. Add credential validation tests
 
@@ -134,12 +135,13 @@ This serves as a contract test — if someone changes a JSON tag, this test brea
 - Malformed credential string (no colon separator) — `GenerateMetadata` returns error.
 - Empty username or password after parsing — `GenerateMetadata` returns error.
 
-### 10. Add unit tests for `GetFeatureSet`
+### 10. Add unit tests for accessor-backed feature support
 
-In `internal/openshift/version_test.go`, add table-driven tests:
-- Default `FeatureSet` (empty string) — returns `""` and nil custom gates.
-- `CustomNoUpgrade` — returns `CustomNoUpgrade` and populated `*CustomFeatureGates`.
-- Missing `FeatureGate` resource — returns error.
+In `internal/openshift/version_test.go`, add table-driven tests for:
+- Enabled gate via accessor.
+- Disabled gate via accessor.
+- Missing cluster version / nil client / nil accessor.
+- Accessor read errors.
 
 ### 11. Document secret layout
 
@@ -157,11 +159,11 @@ Add a doc comment block at the top of `internal/metadata/metadata.go` explaining
 Tests are written before their corresponding implementation so the implementation is forced to meet the contract.
 
 1. **Write JSON contract test** (step 7) — defines the exact key structure the Secret must produce. Fails until types are implemented.
-2. **Write `GetFeatureSet` tests** (step 10) — defines expected behavior for default, `CustomNoUpgrade`, and missing FeatureGate. Fails until helper is implemented.
+2. **Write accessor-backed feature support tests** (step 10) — defines enabled/disabled and error-path behavior. Fails until accessor wiring is implemented.
 3. **Write credential validation tests** (step 9) — missing credentials, malformed format. Fails until `GenerateMetadata` tightens `parseCredentials`.
 4. **Write deduplication test** (step 8) — two failure domains with the same server produce one `VCenters` entry. Fails until `GenerateMetadata` adds dedup logic.
 5. **Implement type changes** (step 1) and **`GenerateMetadata`** (step 2) — contract test, credential tests, and dedup test go green.
-6. **Implement `GetFeatureSet`** (step 3) — feature set tests go green.
+6. **Implement accessor wiring** (step 3) — feature support tests go green.
 7. **Implement `SaveToSecret` label reconciliation** (step 5) and **Secret lifecycle** (step 6).
 8. **Update controller** (step 4) — integration point.
 9. **Update remaining tests** (step 8) and **document** (step 11).
@@ -172,9 +174,11 @@ Tests are written before their corresponding implementation so the implementatio
 |------|--------|
 | `internal/metadata/metadata.go` | Replace types, update `GenerateMetadata`/`SaveToSecret` signatures, credential validation, label reconciliation |
 | `internal/metadata/metadata_test.go` | Update all tests, add JSON contract test, add dedup test, add credential validation tests |
-| `internal/openshift/version.go` | Add `GetFeatureSet()` returning both `FeatureSet` and `*CustomFeatureGates` |
-| `internal/openshift/version_test.go` | Add `GetFeatureSet` tests (default, CustomNoUpgrade, missing) |
-| `internal/controller/vmwarecloudfoundationmigration_controller.go` | Pass `featureSet` and `customFeatureSet` to `GenerateMetadata` |
+| `internal/openshift/version.go` | Switch runtime feature checks to `FeatureGateAccess` |
+| `internal/openshift/version_test.go` | Add accessor-backed feature support tests |
+| `internal/openshift/featuregate.go` | Add startup helper for `FeatureGateAccess` |
+| `internal/controller/vmwarecloudfoundationmigration_controller.go` | Inject `FeatureGateAccess` and stop passing feature-set state into metadata generation |
+| `cmd/main.go` | Initialize and pass the standard feature-gate accessor |
 
 ## Out of Scope
 
