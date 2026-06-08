@@ -15,16 +15,14 @@ import (
 
 func TestGenerateMetadata(t *testing.T) {
 	tests := []struct {
-		name             string
-		failureDomains   []configv1.VSpherePlatformFailureDomainSpec
-		infra            *configv1.Infrastructure
-		credentials      map[string]string
-		featureSet       configv1.FeatureSet
-		customFeatureSet *configv1.CustomFeatureGates
-		wantErr          bool
-		wantInfraID      string
-		wantVCCount      int
-		wantPrimary      string
+		name           string
+		failureDomains []configv1.VSpherePlatformFailureDomainSpec
+		infra          *configv1.Infrastructure
+		credentials    map[string]string
+		wantErr        bool
+		wantInfraID    string
+		wantVCCount    int
+		wantPrimary    string
 	}{
 		{
 			name:    "nil infrastructure",
@@ -69,7 +67,6 @@ func TestGenerateMetadata(t *testing.T) {
 			credentials: map[string]string{
 				"vcenter.example.com": "admin:secret",
 			},
-			featureSet:  configv1.FeatureSet(""),
 			wantInfraID: "my-cluster-abc",
 			wantVCCount: 1,
 			wantPrimary: "vcenter.example.com",
@@ -88,7 +85,6 @@ func TestGenerateMetadata(t *testing.T) {
 				"vc1.example.com": "user1:pass1",
 				"vc2.example.com": "user2:pass2",
 			},
-			featureSet:  configv1.FeatureSet(""),
 			wantInfraID: "infra2a",
 			wantVCCount: 2,
 			wantPrimary: "vc1.example.com",
@@ -106,29 +102,7 @@ func TestGenerateMetadata(t *testing.T) {
 			credentials: map[string]string{
 				"vc1.example.com": "user1:pass1",
 			},
-			featureSet:  configv1.TechPreviewNoUpgrade,
 			wantInfraID: "infra2",
-			wantVCCount: 1,
-			wantPrimary: "vc1.example.com",
-		},
-		{
-			name: "includes custom feature gates",
-			failureDomains: []configv1.VSpherePlatformFailureDomainSpec{
-				{Name: "fd1", Server: "vc1.example.com", Topology: configv1.VSpherePlatformTopology{Datacenter: "dc1"}},
-			},
-			infra: &configv1.Infrastructure{
-				ObjectMeta: metav1.ObjectMeta{Name: "cluster", UID: types.UID("uid3")},
-				Status:     configv1.InfrastructureStatus{InfrastructureName: "infra3"},
-			},
-			credentials: map[string]string{
-				"vc1.example.com": "user1:pass1",
-			},
-			featureSet: configv1.CustomNoUpgrade,
-			customFeatureSet: &configv1.CustomFeatureGates{
-				Enabled:  []configv1.FeatureGateName{"ExampleOn"},
-				Disabled: []configv1.FeatureGateName{"ExampleOff"},
-			},
-			wantInfraID: "infra3",
 			wantVCCount: 1,
 			wantPrimary: "vc1.example.com",
 		},
@@ -137,7 +111,7 @@ func TestGenerateMetadata(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mgr := NewMetadataManager(fakekubeclient.NewClientset())
-			got, err := mgr.GenerateMetadata(context.Background(), tt.failureDomains, tt.infra, tt.credentials, tt.featureSet, tt.customFeatureSet)
+			got, err := mgr.GenerateMetadata(context.Background(), tt.failureDomains, tt.infra, tt.credentials)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("GenerateMetadata: expected error, got nil")
@@ -162,11 +136,11 @@ func TestGenerateMetadata(t *testing.T) {
 			if got.VSphere.TerraformPlatform != "vsphere" {
 				t.Errorf("TerraformPlatform = %q, want %q", got.VSphere.TerraformPlatform, "vsphere")
 			}
-			if got.FeatureSet != tt.featureSet {
-				t.Errorf("FeatureSet = %q, want %q", got.FeatureSet, tt.featureSet)
+			if got.FeatureSet != "" {
+				t.Errorf("FeatureSet = %q, want empty string", got.FeatureSet)
 			}
-			if !reflect.DeepEqual(got.CustomFeatureSet, tt.customFeatureSet) {
-				t.Errorf("CustomFeatureSet = %#v, want %#v", got.CustomFeatureSet, tt.customFeatureSet)
+			if got.CustomFeatureSet != nil {
+				t.Errorf("CustomFeatureSet = %#v, want nil", got.CustomFeatureSet)
 			}
 		})
 	}
@@ -212,7 +186,7 @@ func TestGenerateMetadataCredentialErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mgr := NewMetadataManager(fakekubeclient.NewClientset())
-			if _, err := mgr.GenerateMetadata(context.Background(), failureDomains, infra, tt.credentials, "", nil); err == nil {
+			if _, err := mgr.GenerateMetadata(context.Background(), failureDomains, infra, tt.credentials); err == nil {
 				t.Fatal("GenerateMetadata: expected error, got nil")
 			}
 		})
@@ -242,8 +216,6 @@ func TestGenerateMetadataJSONContract(t *testing.T) {
 			Status:     configv1.InfrastructureStatus{InfrastructureName: "infra4"},
 		},
 		map[string]string{"vc1.example.com": "user1:pass1"},
-		configv1.FeatureSet(""),
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("GenerateMetadata: %v", err)
@@ -260,6 +232,12 @@ func TestGenerateMetadataJSONContract(t *testing.T) {
 	}
 
 	assertMapKeys(t, payload, "clusterName", "clusterID", "infraID", "vsphere", "featureSet", "customFeatureSet")
+	if got, ok := payload["featureSet"]; !ok || got != "" {
+		t.Fatalf("featureSet = %#v, want empty string", got)
+	}
+	if got, ok := payload["customFeatureSet"]; !ok || got != nil {
+		t.Fatalf("customFeatureSet = %#v, want nil", got)
+	}
 
 	vsphereRaw, ok := payload["vsphere"]
 	if !ok {

@@ -86,8 +86,6 @@ func (m *MetadataManager) GenerateMetadata(
 	failureDomains []configv1.VSpherePlatformFailureDomainSpec,
 	infra *configv1.Infrastructure,
 	credentials map[string]string,
-	featureSet configv1.FeatureSet,
-	customFeatureSet *configv1.CustomFeatureGates,
 ) (*ClusterMetadata, error) {
 	log := klog.FromContext(ctx)
 	log.V(2).Info("generating installer metadata")
@@ -106,9 +104,8 @@ func (m *MetadataManager) GenerateMetadata(
 		ClusterName: infra.Name,
 		ClusterID:   string(infra.UID),
 		InfraID:     infra.Status.InfrastructureName,
-		FeatureSet:  featureSet,
-		// GetFeatureSet already returns a defensive copy for CustomNoUpgrade.
-		CustomFeatureSet: customFeatureSet,
+		// Runtime feature-gate decisions use the standard accessor pattern; the
+		// installer-compatible fields remain at their zero values here.
 		VSphere: &VSphereMetadata{
 			TerraformPlatform: "vsphere",
 		},
