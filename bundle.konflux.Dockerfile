@@ -9,7 +9,8 @@ RUN echo "${IMG}" | grep -q '@sha256:placeholder' && \
     { echo "ERROR: IMG contains placeholder digest; override IMG with a valid image reference."; exit 1; } || true
 
 # Replace the bundle image in the repository with the one specified by the IMG build argument.
-RUN chmod -R g+rwX ./ && find bundle -type f -exec sed -i \
+RUN cp -r bundle /tmp/bundle && rm -rf bundle && mv /tmp/bundle bundle && \
+    find bundle -type f -exec sed -i \
     "s|${ORIGINAL_IMG}|${IMG}|g" {} \+; \
     grep -rq "${ORIGINAL_IMG}" bundle/ && \
     { echo "Failed to replace image references"; exit 1; } || echo "Image references replaced" && \
