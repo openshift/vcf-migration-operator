@@ -18,6 +18,8 @@ metadata:
   namespace: vcf-migration-operator-tenant
 spec:
   params:
+  - name: artifact-type
+    value: operatorbundle
   - name: git-url
     value: '{{source_url}}'
   - name: revision
@@ -44,6 +46,14 @@ spec:
   taskRunTemplate:
     serviceAccountName: build-pipeline-vcf-migration-operator-bundle
   workspaces:
+  - name: workspace
+    volumeClaimTemplate:
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
   - name: git-auth
     secret:
       secretName: '{{ git_auth_secret }}'
