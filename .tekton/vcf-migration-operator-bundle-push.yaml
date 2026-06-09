@@ -24,9 +24,12 @@ spec:
   - name: output-image
     value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/vcf-migration-operator/vcf-migration-operator-bundle-main:{{revision}}
   - name: dockerfile
-    value: bundle.Dockerfile
+    value: bundle.konflux.Dockerfile
   - name: path-context
     value: .
+  - name: build-platforms
+    value:
+    - "linux/amd64"
   - name: hermetic
     value: "true"
   - name: prefetch-input
