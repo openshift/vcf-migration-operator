@@ -17,7 +17,8 @@ COPY api/ api/
 COPY internal/ internal/
 COPY console-plugin/cmd/ console-plugin/cmd/
 COPY console-plugin/pkg/ console-plugin/pkg/
-RUN go build -o /plugin ./console-plugin/cmd/plugin
+# VCF Migration Operator only supports x86_64 architecture
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -p=4 -o /plugin ./console-plugin/cmd/plugin
 
 # Stage 3: runtime
 FROM alpine:3.20
