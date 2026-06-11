@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -210,7 +211,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 
 		// Additional privilege checks when image import is enabled.
 		if migration.Spec.Image != nil && fd.Topology.Template == "" {
-			if err := validateImageImportPrivileges(vsphereCtx, session, cluster); err != nil {
+			if err := validateImageImportPrivileges(vsphereCtx, session, cluster, fd.Topology.ResourcePool); err != nil {
 				return "", fmt.Errorf("validating image import privileges for failure domain %q: %w", fd.Name, err)
 			}
 		}
@@ -241,7 +242,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		if ovaURL != "" {
 			if err := checkOVAURLReachable(vsphereCtx, ovaURL); err != nil {
 				log.V(1).Info("OVA URL reachability check failed (may be due to proxy/TLS interceptor)",
-					"url", ovaURL, "error", err)
+					"url", sanitizeOVAURL(ovaURL), "error", err)
 				// Best-effort: warn but don't block (HEAD may fail while GET succeeds).
 			}
 		}
@@ -258,8 +259,10 @@ var imageImportPrivileges = []string{
 }
 
 // validateImageImportPrivileges checks that the authenticated user has the
-// privileges required for OVA import on the cluster's resource pool.
-func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session, cluster *object.ClusterComputeResource) error {
+// privileges required for OVA import on the effective resource pool.
+// When resourcePoolPath is non-empty, privileges are checked against that
+// specific resource pool; otherwise, the cluster's default resource pool is used.
+func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session, cluster *object.ClusterComputeResource, resourcePoolPath string) error {
 	if session == nil || session.Client == nil || session.Client.Client == nil {
 		return fmt.Errorf("session client must not be nil")
 	}
@@ -273,9 +276,18 @@ func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session
 	}
 
 	authMgr := object.NewAuthorizationManager(session.Client.Client)
-	rp, err := cluster.ResourcePool(ctx)
-	if err != nil {
-		return fmt.Errorf("getting cluster resource pool: %w", err)
+
+	var rp *object.ResourcePool
+	if resourcePoolPath != "" {
+		rp, err = session.Finder.ResourcePool(ctx, resourcePoolPath)
+		if err != nil {
+			return fmt.Errorf("finding resource pool %q: %w", resourcePoolPath, err)
+		}
+	} else {
+		rp, err = cluster.ResourcePool(ctx)
+		if err != nil {
+			return fmt.Errorf("getting cluster resource pool: %w", err)
+		}
 	}
 
 	results, err := authMgr.HasUserPrivilegeOnEntities(ctx,
@@ -286,7 +298,7 @@ func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session
 	}
 
 	if len(results) == 0 {
-		return fmt.Errorf("no privilege check results returned for cluster resource pool")
+		return fmt.Errorf("no privilege check results returned for resource pool")
 	}
 
 	var missing []string
@@ -304,7 +316,7 @@ func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session
 	}
 
 	if len(missing) > 0 {
-		return fmt.Errorf("missing required image import privileges on cluster resource pool: %s", strings.Join(missing, ", "))
+		return fmt.Errorf("missing required image import privileges on resource pool: %s", strings.Join(missing, ", "))
 	}
 
 	return nil
@@ -315,20 +327,36 @@ func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session
 func checkOVAURLReachable(ctx context.Context, ovaURL string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, ovaURL, nil)
 	if err != nil {
-		return fmt.Errorf("creating HEAD request for %s: %w", ovaURL, err)
+		return fmt.Errorf("creating HEAD request for %s: %w", sanitizeOVAURL(ovaURL), err)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("OVA URL %s unreachable: %w. For air-gapped environments, set spec.image.ovaUrl to an internal HTTP(S) mirror or omit spec.image and set topology.template manually", ovaURL, err)
+		return fmt.Errorf("OVA URL %s unreachable: %w. For air-gapped environments, set spec.image.ovaUrl to an internal HTTP(S) mirror or omit spec.image and set topology.template manually", sanitizeOVAURL(ovaURL), err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("OVA URL %s returned HTTP %d: %s", ovaURL, resp.StatusCode, resp.Status)
+		return fmt.Errorf("OVA URL %s returned HTTP %d: %s", sanitizeOVAURL(ovaURL), resp.StatusCode, resp.Status)
 	}
 
 	return nil
+}
+
+// sanitizeOVAURL strips query parameters from an OVA URL so that signed tokens
+// and other credentials embedded in query strings are not leaked into logs or
+// error messages. Returns scheme://host/path (with "?<redacted>" appended when
+// query params were present).
+func sanitizeOVAURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<unparseable-url>"
+	}
+	sanitized := u.Scheme + "://" + u.Host + u.Path
+	if u.RawQuery != "" {
+		sanitized += "?<redacted>"
+	}
+	return sanitized
 }
 
 func (r *VmwareCloudFoundationMigrationReconciler) hasTargetVCenterConfiguration(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (bool, error) {

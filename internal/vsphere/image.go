@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +151,7 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 	}
 
 	// Download the OVA.
-	log.Info("downloading OVA", "url", ovaURL, "dest", localPath)
+	log.Info("downloading OVA", "url", sanitizeOVAURL(ovaURL), "dest", localPath)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ovaURL, nil)
 	if err != nil {
@@ -373,6 +374,15 @@ func ImportOVA(ctx context.Context, p ImportOVAParams) (*object.VirtualMachine, 
 		return nil, fmt.Errorf("waiting for NFC lease: %w", err)
 	}
 
+	leaseCompleted := false
+	defer func() {
+		if !leaseCompleted {
+			if abortErr := lease.Abort(ctx, nil); abortErr != nil {
+				log.V(1).Info("failed to abort NFC lease", "error", abortErr)
+			}
+		}
+	}()
+
 	updater := lease.StartUpdater(ctx, info)
 	defer updater.Done()
 
@@ -383,6 +393,7 @@ func ImportOVA(ctx context.Context, p ImportOVAParams) (*object.VirtualMachine, 
 	if err := lease.Complete(ctx); err != nil {
 		return nil, fmt.Errorf("completing NFC lease: %w", err)
 	}
+	leaseCompleted = true
 
 	// Step 6: Retrieve the created VM.
 	vm, err := s.Finder.VirtualMachine(ctx, p.TemplateName)
@@ -629,4 +640,20 @@ func hashFile(path string) (string, error) {
 	}
 
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// sanitizeOVAURL strips query parameters from an OVA URL so that signed tokens
+// and other credentials embedded in query strings are not leaked into logs.
+// Returns scheme://host/path (with "?<redacted>" appended when query params
+// were present).
+func sanitizeOVAURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<unparseable-url>"
+	}
+	sanitized := u.Scheme + "://" + u.Host + u.Path
+	if u.RawQuery != "" {
+		sanitized += "?<redacted>"
+	}
+	return sanitized
 }
