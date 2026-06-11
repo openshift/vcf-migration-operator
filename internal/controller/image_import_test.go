@@ -155,34 +155,28 @@ var _ = Describe("DestinationImageImported Condition", func() {
 			}
 		})
 
-		It("should resolve OVA URL from spec in Phase 2", func() {
+		It("should initialize status.image and fail gracefully without ConfigClient", func() {
 			migration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, migration)).To(Succeed())
 
+			// Reconciler without ConfigClient — handler should return an error,
+			// not panic.
 			reconciler := &VmwareCloudFoundationMigrationReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}
 
-			result, err := reconciler.ensureDestinationImageImported(ctx, migration)
-			// Phase 2 should fail because there's no real infrastructure,
-			// but we can verify it initializes status.image correctly.
-			// The error about getting infrastructure name is expected.
-			if err != nil {
-				// Expected: no ConfigClient, so GetInfrastructureID fails.
-				Expect(err.Error()).To(ContainSubstring("infrastructure"))
-			} else {
-				// If it somehow succeeds, it should requeue.
-				Expect(result.Requeue).To(BeTrue())
-			}
+			_, err := reconciler.ensureDestinationImageImported(ctx, migration)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("ConfigClient"))
 
-			// Verify status.image was initialized.
+			// Verify status.image was initialized before the error.
 			Expect(migration.Status.Image).NotTo(BeNil())
 		})
 	})
 
 	Context("when topology.template is pre-set with spec.image", func() {
-		It("should skip import for FD with existing template", func() {
+		It("should fail gracefully without ConfigClient when all FDs have templates", func() {
 			migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "skip-test",
@@ -214,8 +208,8 @@ var _ = Describe("DestinationImageImported Condition", func() {
 
 			// Manually simulate having already resolved the URL and downloaded.
 			migration.Status.Image = &migrationv1alpha1.ImageStatus{
-				ResolvedOVAUrl:   "https://example.com/rhcos.ova",
-				DownloadComplete: true,
+				ResolvedOVAUrl:    "https://example.com/rhcos.ova",
+				DownloadComplete:  true,
 				ImportedTemplates: make(map[string]string),
 			}
 
@@ -224,17 +218,11 @@ var _ = Describe("DestinationImageImported Condition", func() {
 				Scheme: k8sClient.Scheme(),
 			}
 
-			// The handler should record the existing template and not try to import.
-			result, err := reconciler.ensureDestinationImageImported(ctx, migration)
-
-			// This will fail on GetInfrastructureID since ConfigClient is nil,
-			// but we can verify behavior up to that point.
-			if err != nil {
-				Expect(err.Error()).To(ContainSubstring("infrastructure"))
-			} else {
-				// If it succeeds (e.g. already all imported), check condition.
-				Expect(result.Requeue).To(BeFalse())
-			}
+			// Without ConfigClient, the handler will fail at GetInfrastructureID.
+			// But it should not panic.
+			_, err := reconciler.ensureDestinationImageImported(ctx, migration)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("ConfigClient"))
 		})
 	})
 
