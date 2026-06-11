@@ -21,7 +21,7 @@ COPY console-plugin/pkg/ console-plugin/pkg/
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -p=4 -o /plugin ./console-plugin/cmd/plugin
 
 # Stage 3: runtime
-FROM alpine:3.20
+FROM alpine:3.23
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=backend /plugin /app/plugin
