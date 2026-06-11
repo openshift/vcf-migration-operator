@@ -212,11 +212,31 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}
 
 	// OVA URL reachability check when spec.image is set.
-	if migration.Spec.Image != nil && migration.Spec.Image.OVAUrl != "" {
-		if err := checkOVAURLReachable(vsphereCtx, migration.Spec.Image.OVAUrl); err != nil {
-			log.V(1).Info("OVA URL reachability check failed (may be due to proxy/TLS interceptor)",
-				"url", migration.Spec.Image.OVAUrl, "error", err)
-			// Best-effort: warn but don't block (HEAD may fail while GET succeeds).
+	if migration.Spec.Image != nil {
+		ovaURL := migration.Spec.Image.OVAUrl
+		if ovaURL == "" {
+			// Auto-resolve: try reading the URL from the coreos-bootimages
+			// ConfigMap so we can check reachability before the import phase.
+			cm, err := r.KubeClient.CoreV1().ConfigMaps("openshift-machine-config-operator").Get(vsphereCtx, "coreos-bootimages", metav1.GetOptions{})
+			if err != nil {
+				log.V(1).Info("cannot read coreos-bootimages ConfigMap during preflight, will retry during import",
+					"error", err)
+			} else {
+				ova, err := vsphere.ResolveRHCOSOVAFromConfigMap(cm, "x86_64")
+				if err != nil {
+					log.V(1).Info("cannot resolve RHCOS OVA from ConfigMap during preflight, will retry during import",
+						"error", err)
+				} else {
+					ovaURL = ova.Location
+				}
+			}
+		}
+		if ovaURL != "" {
+			if err := checkOVAURLReachable(vsphereCtx, ovaURL); err != nil {
+				log.V(1).Info("OVA URL reachability check failed (may be due to proxy/TLS interceptor)",
+					"url", ovaURL, "error", err)
+				// Best-effort: warn but don't block (HEAD may fail while GET succeeds).
+			}
 		}
 	}
 
