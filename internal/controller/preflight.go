@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -160,15 +161,82 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 			targetCredentialsByServer[fd.Server] = creds
 		}
 
+<<<<<<< HEAD
 		if err := validateFailureDomain(vsphereCtx, fd, creds); err != nil {
 			return "", err
+=======
+		session, err := getVSphereSession(vsphereCtx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
+		if err != nil {
+			return "", fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
 		}
+
+		datacenter, err := session.Finder.Datacenter(vsphereCtx, fd.Topology.Datacenter)
+		if err != nil {
+			return "", fmt.Errorf("target datacenter %q on %s not found: %w", fd.Topology.Datacenter, fd.Server, err)
+		}
+		cluster, err := session.Finder.ClusterComputeResource(vsphereCtx, fd.Topology.ComputeCluster)
+		if err != nil {
+			return "", fmt.Errorf("target cluster %q on %s not found: %w", fd.Topology.ComputeCluster, fd.Server, err)
+		}
+		if _, err := session.Finder.Datastore(vsphereCtx, fd.Topology.Datastore); err != nil {
+			return "", fmt.Errorf("target datastore %q on %s not found: %w", fd.Topology.Datastore, fd.Server, err)
+		}
+		for _, networkName := range fd.Topology.Networks {
+			if _, err := session.Finder.Network(vsphereCtx, networkName); err != nil {
+				return "", fmt.Errorf("target network %q on %s not found: %w", networkName, fd.Server, err)
+			}
+		}
+		if fd.Topology.ResourcePool != "" {
+			if _, err := session.Finder.ResourcePool(vsphereCtx, fd.Topology.ResourcePool); err != nil {
+				return "", fmt.Errorf("target resource pool %q on %s not found: %w", fd.Topology.ResourcePool, fd.Server, err)
+			}
+		}
+		if fd.Topology.Folder != "" {
+			if _, err := session.Finder.Folder(vsphereCtx, fd.Topology.Folder); err != nil {
+				return "", fmt.Errorf("target folder %q on %s not found: %w", fd.Topology.Folder, fd.Server, err)
+			}
+		}
+		// Template check: skip when spec.image is set and topology.template
+		// is empty — the template will be created by ensureDestinationImageImported.
+		if fd.Topology.Template != "" {
+			if _, err := session.Finder.VirtualMachine(vsphereCtx, fd.Topology.Template); err != nil {
+				return "", fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
+			}
+		} else if migration.Spec.Image == nil {
+			// No spec.image and no template set — warn but don't block.
+			// The template will need to be set before WorkloadMigrated.
+			log.V(1).Info("no template configured for failure domain and spec.image not set",
+				"failureDomain", fd.Name, "server", fd.Server)
+		}
+
+		if err := validateTargetPrivileges(vsphereCtx, session, datacenter, cluster); err != nil {
+			return "", fmt.Errorf("validating target privileges for failure domain %q: %w", fd.Name, err)
+>>>>>>> 83930ea1 (Add RHCOS OVA import automation for destination vCenter)
+		}
+
+		// Additional privilege checks when image import is enabled.
+		if migration.Spec.Image != nil && fd.Topology.Template == "" {
+			if err := validateImageImportPrivileges(vsphereCtx, session, cluster); err != nil {
+				return "", fmt.Errorf("validating image import privileges for failure domain %q: %w", fd.Name, err)
+			}
+		}
+
 		log.V(1).Info("target failure domain validated", "name", fd.Name, "server", fd.Server)
+	}
+
+	// OVA URL reachability check when spec.image is set.
+	if migration.Spec.Image != nil && migration.Spec.Image.OVAUrl != "" {
+		if err := checkOVAURLReachable(vsphereCtx, migration.Spec.Image.OVAUrl); err != nil {
+			log.V(1).Info("OVA URL reachability check failed (may be due to proxy/TLS interceptor)",
+				"url", migration.Spec.Image.OVAUrl, "error", err)
+			// Best-effort: warn but don't block (HEAD may fail while GET succeeds).
+		}
 	}
 
 	return "Preflight validation passed", nil
 }
 
+<<<<<<< HEAD
 func validateFailureDomain(ctx context.Context, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
 	session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
 	if err != nil {
@@ -207,6 +275,87 @@ func validateFailureDomain(ctx context.Context, fd *configv1.VSpherePlatformFail
 		}
 	}
 	return validateTargetPrivileges(ctx, session, datacenter, cluster)
+=======
+// imageImportPrivileges are the vCenter privileges required for OVA import.
+var imageImportPrivileges = []string{
+	"VApp.Import",
+	"VirtualMachine.Config.AddNewDisk",
+	"VirtualMachine.Inventory.CreateFromExisting",
+}
+
+// validateImageImportPrivileges checks that the authenticated user has the
+// privileges required for OVA import on the cluster's resource pool.
+func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session, cluster *object.ClusterComputeResource) error {
+	if session == nil || session.Client == nil || session.Client.Client == nil {
+		return fmt.Errorf("session client must not be nil")
+	}
+
+	userSession, err := session.Client.SessionManager.UserSession(ctx)
+	if err != nil {
+		return fmt.Errorf("getting current vSphere user session: %w", err)
+	}
+	if userSession == nil {
+		return fmt.Errorf("current vSphere user session not found")
+	}
+
+	authMgr := object.NewAuthorizationManager(session.Client.Client)
+	rp, err := cluster.ResourcePool(ctx)
+	if err != nil {
+		return fmt.Errorf("getting cluster resource pool: %w", err)
+	}
+
+	results, err := authMgr.HasUserPrivilegeOnEntities(ctx,
+		[]types.ManagedObjectReference{rp.Reference()},
+		userSession.UserName, imageImportPrivileges)
+	if err != nil {
+		return fmt.Errorf("checking image import privileges: %w", err)
+	}
+
+	if len(results) == 0 {
+		return fmt.Errorf("no privilege check results returned for cluster resource pool")
+	}
+
+	var missing []string
+	for _, priv := range imageImportPrivileges {
+		found := false
+		for _, pa := range results[0].PrivAvailability {
+			if pa.PrivId == priv && pa.IsGranted {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, priv)
+		}
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required image import privileges on cluster resource pool: %s", strings.Join(missing, ", "))
+	}
+
+	return nil
+}
+
+// checkOVAURLReachable performs a best-effort HEAD request against the OVA URL
+// to verify it is reachable before starting the migration.
+func checkOVAURLReachable(ctx context.Context, ovaURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, ovaURL, nil)
+	if err != nil {
+		return fmt.Errorf("creating HEAD request for %s: %w", ovaURL, err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("OVA URL %s unreachable: %w. For air-gapped environments, set spec.image.ovaUrl to an internal HTTP(S) mirror or omit spec.image and set topology.template manually", ovaURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("OVA URL %s returned HTTP %d: %s", ovaURL, resp.StatusCode, resp.Status)
+	}
+
+	return nil
+>>>>>>> 83930ea1 (Add RHCOS OVA import automation for destination vCenter)
 }
 
 func (r *VmwareCloudFoundationMigrationReconciler) hasTargetVCenterConfiguration(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (bool, error) {
