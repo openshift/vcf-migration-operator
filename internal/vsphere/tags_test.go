@@ -346,6 +346,70 @@ func TestAttachFailureDomainTags(t *testing.T) {
 	})
 }
 
+func TestEnsureClusterTag(t *testing.T) {
+	t.Run("rejects nil session", func(t *testing.T) {
+		_, err := EnsureClusterTag(context.Background(), nil, "test-infra")
+		if err == nil {
+			t.Fatal("EnsureClusterTag succeeded, want nil session error")
+		}
+		if !strings.Contains(err.Error(), "session and TagManager must not be nil") {
+			t.Fatalf("EnsureClusterTag error = %q, want nil session detail", err.Error())
+		}
+	})
+
+	t.Run("creates category and tag", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+
+			tagID, err := EnsureClusterTag(ctx, s, "my-cluster-abcd")
+			if err != nil {
+				t.Fatalf("EnsureClusterTag: %v", err)
+			}
+			if tagID == "" {
+				t.Fatal("EnsureClusterTag returned empty tag ID")
+			}
+
+			// Verify category exists with correct name and cardinality.
+			cat, err := s.TagManager.GetCategory(ctx, "openshift-my-cluster-abcd")
+			if err != nil {
+				t.Fatalf("GetCategory: %v", err)
+			}
+			if cat.Cardinality != "SINGLE" {
+				t.Fatalf("category cardinality = %q, want SINGLE", cat.Cardinality)
+			}
+
+			// Verify tag exists.
+			tag, err := s.TagManager.GetTag(ctx, tagID)
+			if err != nil {
+				t.Fatalf("GetTag: %v", err)
+			}
+			if tag.Name != "my-cluster-abcd" {
+				t.Fatalf("tag name = %q, want %q", tag.Name, "my-cluster-abcd")
+			}
+		})
+	})
+
+	t.Run("is idempotent", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+
+			tagID1, err := EnsureClusterTag(ctx, s, "idem-test")
+			if err != nil {
+				t.Fatalf("EnsureClusterTag (first): %v", err)
+			}
+
+			tagID2, err := EnsureClusterTag(ctx, s, "idem-test")
+			if err != nil {
+				t.Fatalf("EnsureClusterTag (second): %v", err)
+			}
+
+			if tagID1 != tagID2 {
+				t.Fatalf("tag IDs not stable: first=%q second=%q", tagID1, tagID2)
+			}
+		})
+	})
+}
+
 func createTestCategory(ctx context.Context, t *testing.T, s *Session, category tags.Category) string {
 	t.Helper()
 

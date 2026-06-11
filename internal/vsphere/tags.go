@@ -33,6 +33,16 @@ const (
 	datastoreType = "Datastore"
 	// folderType is the vSphere associable type name for folders.
 	folderType = "Folder"
+	// virtualMachineType is the vSphere associable type name for VMs.
+	virtualMachineType = "VirtualMachine"
+	// resourcePoolType is the vSphere associable type name for resource pools.
+	resourcePoolType = "ResourcePool"
+	// storagePodType is the vSphere associable type name for datastore clusters.
+	storagePodType = "StoragePod"
+
+	// clusterTagCategoryDescription is used for the per-cluster infra tag category,
+	// matching openshift-install behavior.
+	clusterTagCategoryDescription = "Added by openshift-install do not remove"
 )
 
 var (
@@ -277,4 +287,91 @@ func AttachFailureDomainTags(ctx context.Context, s *Session, regionTagID, zoneT
 	}
 
 	return nil
+}
+
+// EnsureClusterTag ensures the OpenShift cluster tag category and tag exist
+// on the vCenter, matching openshift-install behavior. Returns the tag ID
+// to pass to AttachTag after template import.
+//
+// The category name is "openshift-<infraID>" with SINGLE cardinality,
+// associable to VirtualMachine, ResourcePool, Folder, Datastore, and
+// StoragePod types. The tag name is the infraID itself.
+//
+// This function is idempotent: it creates the category and tag if they
+// do not exist, or reuses existing ones.
+//
+// Adapted from openshift/installer pkg/infrastructure/vsphere/clusterapi/tags.go:createClusterTagID.
+func EnsureClusterTag(ctx context.Context, s *Session, infraID string) (string, error) {
+	if s == nil || s.TagManager == nil {
+		return "", fmt.Errorf("session and TagManager must not be nil")
+	}
+	log := klog.FromContext(ctx)
+
+	categoryName := fmt.Sprintf("openshift-%s", infraID)
+
+	// The cluster infra tag category uses a different set of associable types
+	// than the region/zone categories, matching the installer exactly.
+	clusterAssociableTypes := []string{
+		virtualMachineType,
+		resourcePoolType,
+		folderType,
+		datastoreType,
+		storagePodType,
+	}
+
+	// Get or create category.
+	categoryID, err := ensureTagCategoryWithTypes(ctx, s, categoryName, clusterTagCategoryDescription, "SINGLE", clusterAssociableTypes)
+	if err != nil {
+		return "", fmt.Errorf("ensuring cluster tag category %q: %w", categoryName, err)
+	}
+	log.V(1).Info("ensured cluster tag category", "name", categoryName, "id", categoryID)
+
+	// Get or create tag within the category.
+	tagID, err := EnsureTag(ctx, s, categoryID, infraID, clusterTagCategoryDescription)
+	if err != nil {
+		return "", fmt.Errorf("ensuring cluster tag %q in category %q: %w", infraID, categoryName, err)
+	}
+	log.V(1).Info("ensured cluster tag", "name", infraID, "id", tagID, "category", categoryName)
+
+	return tagID, nil
+}
+
+// ensureTagCategoryWithTypes creates or retrieves a tag category with the given
+// associable types. Unlike EnsureTagCategory, this accepts the associable types
+// as a parameter instead of using the package-level default.
+func ensureTagCategoryWithTypes(ctx context.Context, s *Session, name, description, cardinality string, associableTypes []string) (string, error) {
+	log := klog.FromContext(ctx)
+	log.V(2).Info("ensuring tag category with custom types", "name", name, "cardinality", cardinality)
+
+	existing, err := s.TagManager.GetCategory(ctx, name)
+	if err == nil && existing != nil && existing.ID != "" {
+		if existing.Cardinality != cardinality {
+			return "", fmt.Errorf("existing tag category %q has cardinality %q, required %q", name, existing.Cardinality, cardinality)
+		}
+		log.V(2).Info("using existing tag category", "name", name, "id", existing.ID)
+		return existing.ID, nil
+	}
+
+	cat := tags.Category{
+		Name:            name,
+		Description:     description,
+		Cardinality:     cardinality,
+		AssociableTypes: associableTypes,
+	}
+
+	id, err := s.TagManager.CreateCategory(ctx, &cat)
+	if err != nil {
+		if isAlreadyExists(err) {
+			existing, getErr := s.TagManager.GetCategory(ctx, name)
+			if getErr != nil {
+				return "", fmt.Errorf("creating tag category %q (already exists but get failed): %w", name, getErr)
+			}
+			log.V(2).Info("tag category already existed, using existing", "name", name, "id", existing.ID)
+			return existing.ID, nil
+		}
+		return "", fmt.Errorf("creating tag category %q: %w", name, err)
+	}
+
+	log.V(2).Info("created tag category", "name", name, "id", id)
+	return id, nil
 }

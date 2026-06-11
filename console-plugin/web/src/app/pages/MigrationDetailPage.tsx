@@ -49,6 +49,7 @@ const migrationGVK = {
 const conditionOrder = [
   'InfrastructurePrepared',
   'DestinationInitialized',
+  'DestinationImageImported',
   'MultiSiteConfigured',
   'WorkloadMigrated',
   'SourceCleaned',
@@ -58,6 +59,7 @@ const conditionOrder = [
 const conditionLabels: Record<string, string> = {
   InfrastructurePrepared: 'Infrastructure prepared',
   DestinationInitialized: 'Destination initialized',
+  DestinationImageImported: 'Image imported',
   MultiSiteConfigured: 'Multi-site configured',
   WorkloadMigrated: 'Workload migrated',
   SourceCleaned: 'Source cleaned',
