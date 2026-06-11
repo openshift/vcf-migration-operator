@@ -71,7 +71,13 @@ var conditionOrder = []string{
 	migrationv1alpha1.ConditionReady,
 }
 
-const reasonWaitingForVSpherePods = "WaitingForVSpherePods"
+const (
+	reasonWaitingForVSpherePods = "WaitingForVSpherePods"
+
+	// ovaDownloadTimeout is the maximum duration for OVA file download.
+	// RHCOS OVAs are ~800MB–1.2GB; 15 minutes allows for slow networks.
+	ovaDownloadTimeout = 15 * time.Minute
+)
 
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations/status,verbs=get;update;patch
@@ -123,13 +129,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	// Walk conditions in order; execute work for the first non-True condition.
 	type conditionHandler func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error)
 	handlers := map[string]conditionHandler{
-		migrationv1alpha1.ConditionInfrastructurePrepared:  r.ensureInfrastructurePrepared,
-		migrationv1alpha1.ConditionDestinationInitialized:  r.ensureDestinationInitialized,
+		migrationv1alpha1.ConditionInfrastructurePrepared:   r.ensureInfrastructurePrepared,
+		migrationv1alpha1.ConditionDestinationInitialized:   r.ensureDestinationInitialized,
 		migrationv1alpha1.ConditionDestinationImageImported: r.ensureDestinationImageImported,
-		migrationv1alpha1.ConditionMultiSiteConfigured:     r.ensureMultiSiteConfigured,
-		migrationv1alpha1.ConditionWorkloadMigrated:        r.ensureWorkloadMigrated,
-		migrationv1alpha1.ConditionSourceCleaned:           r.ensureSourceCleaned,
-		migrationv1alpha1.ConditionReady:                   r.ensureReady,
+		migrationv1alpha1.ConditionMultiSiteConfigured:      r.ensureMultiSiteConfigured,
+		migrationv1alpha1.ConditionWorkloadMigrated:         r.ensureWorkloadMigrated,
+		migrationv1alpha1.ConditionSourceCleaned:            r.ensureSourceCleaned,
+		migrationv1alpha1.ConditionReady:                    r.ensureReady,
 	}
 
 	for _, condType := range conditionOrder {
@@ -374,6 +380,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 		migration.Status.Image = &migrationv1alpha1.ImageStatus{}
 	}
 
+	if r.ConfigClient == nil {
+		return ctrl.Result{}, fmt.Errorf("getting infrastructure name: ConfigClient is not configured")
+	}
 	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	infraID, err := infraMgr.GetInfrastructureID(ctx)
 	if err != nil {
@@ -414,7 +423,12 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 
 	// Phase 3: Download OVA.
 	if !migration.Status.Image.DownloadComplete {
-		localPath, err := vsphere.DownloadOVA(ctx, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.ResolvedSHA256)
+		// Use an explicit timeout for the download to avoid blocking the
+		// reconcile loop indefinitely on slow networks.
+		downloadCtx, downloadCancel := context.WithTimeout(ctx, ovaDownloadTimeout)
+		defer downloadCancel()
+
+		localPath, err := vsphere.DownloadOVA(downloadCtx, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.ResolvedSHA256)
 		if err != nil {
 			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed,
 				fmt.Sprintf("Failed to download OVA: %v", err))
@@ -549,6 +563,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	}
 
 	// Phase 5: Populate topology.template and set condition True.
+	// Count pre-existing templates before we fill in the blanks so the
+	// completion message distinguishes imported vs pre-existing.
+	preExisting := 0
+	for _, fd := range migration.Spec.FailureDomains {
+		if fd.Topology.Template != "" {
+			preExisting++
+		}
+	}
+
 	specChanged := false
 	for i := range migration.Spec.FailureDomains {
 		fd := &migration.Spec.FailureDomains[i]
@@ -567,18 +590,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 		log.Info("populated topology.template in failure domains from imported templates")
 	}
 
-	imported := 0
-	skipped := 0
-	for _, fd := range migration.Spec.FailureDomains {
-		if _, ok := migration.Status.Image.ImportedTemplates[fd.Name]; ok {
-			if fd.Topology.Template != "" {
-				imported++
-			}
-		}
-	}
-	skipped = len(migration.Spec.FailureDomains) - imported
-
-	msg := fmt.Sprintf("All templates ready (%d imported, %d pre-existing)", imported-skipped, skipped)
+	newlyImported := len(migration.Spec.FailureDomains) - preExisting
+	msg := fmt.Sprintf("All templates ready (%d imported, %d pre-existing)", newlyImported, preExisting)
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, msg)
 	r.Recorder.Event(migration, "Normal", "DestinationImageImported", msg)
 	return ctrl.Result{}, nil
