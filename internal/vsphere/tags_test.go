@@ -378,6 +378,21 @@ func TestEnsureClusterTag(t *testing.T) {
 				t.Fatalf("category cardinality = %q, want SINGLE", cat.Cardinality)
 			}
 
+			// Verify category has the required associable types for cluster tags.
+			requiredTypes := []string{virtualMachineType, resourcePoolType, folderType, datastoreType, storagePodType}
+			for _, rt := range requiredTypes {
+				found := false
+				for _, at := range cat.AssociableTypes {
+					if at == rt {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("category AssociableTypes = %v, missing required type %q", cat.AssociableTypes, rt)
+				}
+			}
+
 			// Verify tag exists.
 			tag, err := s.TagManager.GetTag(ctx, tagID)
 			if err != nil {
@@ -405,6 +420,32 @@ func TestEnsureClusterTag(t *testing.T) {
 
 			if tagID1 != tagID2 {
 				t.Fatalf("tag IDs not stable: first=%q second=%q", tagID1, tagID2)
+			}
+		})
+	})
+
+	t.Run("rejects incompatible existing category", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+
+			// Pre-create a category with the expected name but missing
+			// VirtualMachine from its AssociableTypes.
+			createTestCategory(ctx, t, s, tags.Category{
+				Name:            "openshift-bad-infra",
+				Description:     "incompatible category",
+				Cardinality:     "SINGLE",
+				AssociableTypes: []string{datastoreType, folderType},
+			})
+
+			_, err := EnsureClusterTag(ctx, s, "bad-infra")
+			if err == nil {
+				t.Fatal("EnsureClusterTag succeeded, want incompatible category error")
+			}
+			if !strings.Contains(err.Error(), "missing required associable types") {
+				t.Fatalf("EnsureClusterTag error = %q, want missing associable types detail", err.Error())
+			}
+			if !strings.Contains(err.Error(), virtualMachineType) {
+				t.Fatalf("EnsureClusterTag error = %q, want %q in missing types", err.Error(), virtualMachineType)
 			}
 		})
 	})

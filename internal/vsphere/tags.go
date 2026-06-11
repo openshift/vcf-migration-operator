@@ -99,6 +99,29 @@ func missingAssociableTypes(existingTypes, requiredTypes []string) []string {
 	return missing
 }
 
+// validateCategoryCompatibility checks that an existing tag category has the
+// expected cardinality and includes all required associable types. Unlike
+// validateExistingCategory, this accepts the required types as a parameter
+// instead of using the package-level requiredTagCategoryAssociableTypes.
+func validateCategoryCompatibility(category *tags.Category, name, cardinality string, requiredTypes []string) error {
+	var incompatibilities []string
+
+	if category.Cardinality != cardinality {
+		incompatibilities = append(incompatibilities, fmt.Sprintf("cardinality %q does not match required %q", category.Cardinality, cardinality))
+	}
+
+	missing := missingAssociableTypes(category.AssociableTypes, requiredTypes)
+	if len(missing) > 0 {
+		incompatibilities = append(incompatibilities, fmt.Sprintf("missing required associable types %s", strings.Join(missing, ", ")))
+	}
+
+	if len(incompatibilities) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("existing tag category %q is incompatible: %s; update the category in the vSphere UI or delete it and let the operator recreate it", name, strings.Join(incompatibilities, "; "))
+}
+
 // EnsureTagCategory returns the vSphere tag category ID for the given name,
 // creating the category if it does not exist. If the category already exists
 // (e.g. from a previous run or another cluster), it is looked up and its ID is
@@ -345,8 +368,8 @@ func ensureTagCategoryWithTypes(ctx context.Context, s *Session, name, descripti
 
 	existing, err := s.TagManager.GetCategory(ctx, name)
 	if err == nil && existing != nil && existing.ID != "" {
-		if existing.Cardinality != cardinality {
-			return "", fmt.Errorf("existing tag category %q has cardinality %q, required %q", name, existing.Cardinality, cardinality)
+		if err := validateCategoryCompatibility(existing, name, cardinality, associableTypes); err != nil {
+			return "", err
 		}
 		log.V(2).Info("using existing tag category", "name", name, "id", existing.ID)
 		return existing.ID, nil
@@ -365,6 +388,9 @@ func ensureTagCategoryWithTypes(ctx context.Context, s *Session, name, descripti
 			existing, getErr := s.TagManager.GetCategory(ctx, name)
 			if getErr != nil {
 				return "", fmt.Errorf("creating tag category %q (already exists but get failed): %w", name, getErr)
+			}
+			if err := validateCategoryCompatibility(existing, name, cardinality, associableTypes); err != nil {
+				return "", err
 			}
 			log.V(2).Info("tag category already existed, using existing", "name", name, "id", existing.ID)
 			return existing.ID, nil
