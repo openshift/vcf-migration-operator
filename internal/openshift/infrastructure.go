@@ -185,4 +185,3 @@ func (m *InfrastructureManager) GetInfrastructureID(ctx context.Context) (string
 
 	return infra.Status.InfrastructureName, nil
 }
-

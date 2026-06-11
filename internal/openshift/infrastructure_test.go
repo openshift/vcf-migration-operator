@@ -43,8 +43,8 @@ func TestGetSourceVCenter(t *testing.T) {
 			wantServer: "source.example.com",
 		},
 		{
-			name: "errors when no vcenters configured",
-			infra: newTestInfrastructure(nil, nil),
+			name:    "errors when no vcenters configured",
+			infra:   newTestInfrastructure(nil, nil),
 			wantErr: true,
 		},
 		{
@@ -126,13 +126,13 @@ func TestGetSourceFailureDomain(t *testing.T) {
 
 func TestAddTargetVCenter(t *testing.T) {
 	tests := []struct {
-		name              string
-		infra             *configv1.Infrastructure
-		failureDomains    []configv1.VSpherePlatformFailureDomainSpec
-		wantErr           bool
-		wantVCenterCount  int
-		wantFDCount       int
-		wantVCenterNames  []string
+		name             string
+		infra            *configv1.Infrastructure
+		failureDomains   []configv1.VSpherePlatformFailureDomainSpec
+		wantErr          bool
+		wantVCenterCount int
+		wantFDCount      int
+		wantVCenterNames []string
 	}{
 		{
 			name: "adds new vcenter and failure domains",
