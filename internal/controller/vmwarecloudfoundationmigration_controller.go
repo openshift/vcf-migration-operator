@@ -25,6 +25,7 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	configclient "github.com/openshift/client-go/config/clientset/versioned"
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
+	"github.com/openshift/library-go/pkg/operator/configobserver/featuregates"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,12 +49,13 @@ import (
 // progressing through a series of conditions in order.
 type VmwareCloudFoundationMigrationReconciler struct {
 	client.Client
-	Scheme        *runtime.Scheme
-	KubeClient    kubernetes.Interface
-	ConfigClient  configclient.Interface
-	MachineClient machineclient.Interface
-	DynamicClient dynamic.Interface
-	Recorder      record.EventRecorder
+	Scheme              *runtime.Scheme
+	KubeClient          kubernetes.Interface
+	ConfigClient        configclient.Interface
+	FeatureGateAccessor featuregates.FeatureGateAccess
+	MachineClient       machineclient.Interface
+	DynamicClient       dynamic.Interface
+	Recorder            record.EventRecorder
 }
 
 // conditionOrder defines the sequence in which conditions are evaluated.
