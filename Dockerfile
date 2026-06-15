@@ -1,5 +1,5 @@
 ARG BUILD_IMAGE=registry.access.redhat.com/ubi9/go-toolset:latest
-ARG RUNTIME_IMAGE=registry.access.redhat.com/ubi9/ubi-micro:latest
+ARG RUNTIME_IMAGE=registry.access.redhat.com/ubi9-minimal:latest
 FROM ${BUILD_IMAGE} as builder
 
 WORKDIR /workspace
@@ -25,6 +25,9 @@ FROM ${RUNTIME_IMAGE}
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY LICENSE /licenses/license.txt
+
+RUN microdnf update -y && rm -rf /var/cache/yum
+RUN microdnf install openshift-clients -y && microdnf clean all
 
 USER 65532:65532
 LABEL com.redhat.component="VCF Migration Operator"
