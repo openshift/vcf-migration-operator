@@ -32,6 +32,9 @@ var (
 	machineAutoscalerGVR  = schema.GroupVersionResource{Group: "autoscaling.openshift.io", Version: "v1beta1", Resource: "machineautoscalers"}
 )
 
+// platformMachineHealthChecks lists MHCs that do not interfere with cross-vCenter migration.
+// machine-api-termination-handler only reacts to cloud provider preemption signals,
+// not node health conditions, so it is safe to leave in place during migration.
 var platformMachineHealthChecks = map[string]bool{
 	"openshift-machine-api/machine-api-termination-handler": true,
 }
