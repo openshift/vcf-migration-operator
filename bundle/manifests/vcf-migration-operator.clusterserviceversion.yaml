@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-05-29T23:59:27Z"
+    createdAt: "2026-06-17T18:57:35Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
@@ -102,19 +102,10 @@ spec:
           - ""
           resources:
           - nodes
+          - persistentvolumes
           verbs:
           - get
           - list
-          - watch
-        - apiGroups:
-          - apiextensions.k8s.io
-          resources:
-          - customresourcedefinitions
-          verbs:
-          - get
-          - list
-          - patch
-          - update
           - watch
         - apiGroups:
           - apps
@@ -127,6 +118,15 @@ spec:
           - update
           - watch
         - apiGroups:
+          - autoscaling.openshift.io
+          resources:
+          - clusterautoscalers
+          - machineautoscalers
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
           - config.openshift.io
           resources:
           - clusteroperators
@@ -136,6 +136,15 @@ spec:
           - list
           - patch
           - update
+          - watch
+        - apiGroups:
+          - config.openshift.io
+          resources:
+          - clusterversions
+          - featuregates
+          verbs:
+          - get
+          - list
           - watch
         - apiGroups:
           - coordination.k8s.io
@@ -162,6 +171,14 @@ spec:
           - list
           - patch
           - update
+          - watch
+        - apiGroups:
+          - machine.openshift.io
+          resources:
+          - machinehealthchecks
+          verbs:
+          - get
+          - list
           - watch
         - apiGroups:
           - migration.openshift.io
