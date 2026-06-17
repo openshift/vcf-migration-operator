@@ -33,9 +33,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/metadata"
@@ -819,6 +822,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) SetupWithManager(mgr ctrl.Man
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
 		Named("vmwarecloudfoundationmigration").
+		WithOptions(controller.Options{
+			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](5*time.Second, 5*time.Minute),
+		}).
 		Complete(r)
 }
 

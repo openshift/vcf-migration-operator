@@ -160,6 +160,22 @@ func TestCheckInterferingRolloutResources(t *testing.T) {
 			},
 		},
 		{
+			name: "skips platform-default machine-api-termination-handler",
+			objects: []runtime.Object{
+				newUnstructuredResource("machine.openshift.io/v1beta1", "MachineHealthCheck", "openshift-machine-api", "machine-api-termination-handler"),
+			},
+			wantErr: false,
+		},
+		{
+			name: "blocks on user MHC while skipping termination handler",
+			objects: []runtime.Object{
+				newUnstructuredResource("machine.openshift.io/v1beta1", "MachineHealthCheck", "openshift-machine-api", "machine-api-termination-handler"),
+				newUnstructuredResource("machine.openshift.io/v1beta1", "MachineHealthCheck", "openshift-machine-api", "worker-mhc"),
+			},
+			wantErr:      true,
+			wantContains: []string{"MachineHealthCheck resources: openshift-machine-api/worker-mhc"},
+		},
+		{
 			name: "ignores resource not found and no match errors",
 			listErrors: map[schema.GroupVersionResource]error{
 				clusterAutoscalerGVR: apierrors.NewNotFound(schema.GroupResource{Group: clusterAutoscalerGVR.Group, Resource: clusterAutoscalerGVR.Resource}, clusterAutoscalerGVR.Resource),
