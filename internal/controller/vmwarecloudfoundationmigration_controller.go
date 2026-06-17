@@ -855,7 +855,11 @@ func sanitizeRFC1123(s string) string {
 }
 
 func workerMachineSetName(infraID, fdName string) string {
-	return fmt.Sprintf("%s-worker-%s", infraID, sanitizeRFC1123(fdName))
+	sanitized := sanitizeRFC1123(fdName)
+	if sanitized == "" {
+		sanitized = "default"
+	}
+	return fmt.Sprintf("%s-worker-%s", infraID, sanitized)
 }
 
 // checkWorkerReadiness verifies that all machines and nodes for the target worker

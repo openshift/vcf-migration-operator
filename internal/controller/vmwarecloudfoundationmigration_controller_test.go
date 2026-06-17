@@ -47,6 +47,9 @@ func TestSanitizeRFC1123(t *testing.T) {
 		{name: "leading invalid", input: "_zone", want: "zone"},
 		{name: "trailing invalid", input: "zone_", want: "zone"},
 		{name: "mixed invalid", input: "My Zone!@#1", want: "my-zone-1"},
+		{name: "empty string", input: "", want: ""},
+		{name: "all invalid", input: "___", want: ""},
+		{name: "only hyphens", input: "---", want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -76,6 +79,12 @@ func TestWorkerMachineSetName(t *testing.T) {
 			infraID: "ci-op-abc-12345",
 			fdName:  "funny_solomon",
 			want:    "ci-op-abc-12345-worker-funny-solomon",
+		},
+		{
+			name:    "all invalid chars falls back to default",
+			infraID: "ci-op-abc-12345",
+			fdName:  "___",
+			want:    "ci-op-abc-12345-worker-default",
 		},
 	}
 	for _, tt := range tests {
