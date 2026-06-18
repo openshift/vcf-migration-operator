@@ -840,18 +840,18 @@ func failureDomainNames(fds []configv1.VSpherePlatformFailureDomainSpec) []strin
 // sanitizeRFC1123 converts s to a valid RFC 1123 subdomain label by lower-casing,
 // replacing non-alphanumeric characters with hyphens, collapsing runs of hyphens,
 // and trimming leading/trailing hyphens.
-func sanitizeRFC1123(s string) string {
-	s = strings.ToLower(s)
-	s = strings.Map(func(r rune) rune {
+func sanitizeRFC1123(name string) string {
+	name = strings.ToLower(name)
+	name = strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
 			return r
 		}
 		return '-'
-	}, s)
-	for strings.Contains(s, "--") {
-		s = strings.ReplaceAll(s, "--", "-")
+	}, name)
+	for strings.Contains(name, "--") {
+		name = strings.ReplaceAll(name, "--", "-")
 	}
-	return strings.Trim(s, "-")
+	return strings.Trim(name, "-")
 }
 
 func workerMachineSetName(infraID, fdName string) string {
