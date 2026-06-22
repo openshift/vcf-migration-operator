@@ -308,21 +308,21 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 		if needRegion {
 			regionCatID, err := vsphere.EnsureTagCategory(ctx, session, vsphere.TagCategoryRegion, vsphere.TagCategoryRegionDescription, "SINGLE")
 			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("creating region tag category for failure domain %q: %w", fd.Name, err)
+				return ctrl.Result{}, fmt.Errorf("failed to create region tag category for failure domain %q: %w", fd.Name, err)
 			}
 			regionTagID, err = vsphere.EnsureTag(ctx, session, regionCatID, fd.Region, fmt.Sprintf("OpenShift region %s", fd.Region))
 			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("creating region tag for failure domain %q: %w", fd.Name, err)
+				return ctrl.Result{}, fmt.Errorf("failed to create region tag for failure domain %q: %w", fd.Name, err)
 			}
 		}
 		if needZone {
 			zoneCatID, err := vsphere.EnsureTagCategory(ctx, session, vsphere.TagCategoryZone, vsphere.TagCategoryZoneDescription, "SINGLE")
 			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("creating zone tag category for failure domain %q: %w", fd.Name, err)
+				return ctrl.Result{}, fmt.Errorf("failed to create zone tag category for failure domain %q: %w", fd.Name, err)
 			}
 			zoneTagID, err = vsphere.EnsureTag(ctx, session, zoneCatID, fd.Zone, fmt.Sprintf("OpenShift zone %s", fd.Zone))
 			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("creating zone tag for failure domain %q: %w", fd.Name, err)
+				return ctrl.Result{}, fmt.Errorf("failed to create zone tag for failure domain %q: %w", fd.Name, err)
 			}
 		}
 
