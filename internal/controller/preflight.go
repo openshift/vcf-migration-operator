@@ -162,10 +162,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 			targetCredentialsByServer[fd.Server] = creds
 		}
 
-<<<<<<< HEAD
-		if err := validateFailureDomain(vsphereCtx, fd, creds); err != nil {
-			return "", err
-=======
 		session, err := getVSphereSession(vsphereCtx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
 		if err != nil {
 			return "", fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
@@ -212,7 +208,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 
 		if err := validateTargetPrivileges(vsphereCtx, session, datacenter, cluster); err != nil {
 			return "", fmt.Errorf("validating target privileges for failure domain %q: %w", fd.Name, err)
->>>>>>> 83930ea1 (Add RHCOS OVA import automation for destination vCenter)
 		}
 
 		// Additional privilege checks when image import is enabled.
@@ -257,46 +252,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	return "Preflight validation passed", nil
 }
 
-<<<<<<< HEAD
-func validateFailureDomain(ctx context.Context, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
-	session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
-	if err != nil {
-		return fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
-	}
-
-	datacenter, err := session.Finder.Datacenter(ctx, fd.Topology.Datacenter)
-	if err != nil {
-		return fmt.Errorf("target datacenter %q on %s not found: %w", fd.Topology.Datacenter, fd.Server, err)
-	}
-	cluster, err := session.Finder.ClusterComputeResource(ctx, fd.Topology.ComputeCluster)
-	if err != nil {
-		return fmt.Errorf("target cluster %q on %s not found: %w", fd.Topology.ComputeCluster, fd.Server, err)
-	}
-	if _, err := session.Finder.Datastore(ctx, fd.Topology.Datastore); err != nil {
-		return fmt.Errorf("target datastore %q on %s not found: %w", fd.Topology.Datastore, fd.Server, err)
-	}
-	for _, networkName := range fd.Topology.Networks {
-		if _, err := session.Finder.Network(ctx, networkName); err != nil {
-			return fmt.Errorf("target network %q on %s not found: %w", networkName, fd.Server, err)
-		}
-	}
-	if fd.Topology.ResourcePool != "" {
-		if _, err := session.Finder.ResourcePool(ctx, fd.Topology.ResourcePool); err != nil {
-			return fmt.Errorf("target resource pool %q on %s not found: %w", fd.Topology.ResourcePool, fd.Server, err)
-		}
-	}
-	if fd.Topology.Folder != "" {
-		if _, err := session.Finder.Folder(ctx, fd.Topology.Folder); err != nil {
-			return fmt.Errorf("target folder %q on %s not found: %w", fd.Topology.Folder, fd.Server, err)
-		}
-	}
-	if fd.Topology.Template != "" {
-		if _, err := session.Finder.VirtualMachine(ctx, fd.Topology.Template); err != nil {
-			return fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
-		}
-	}
-	return validateTargetPrivileges(ctx, session, datacenter, cluster)
-=======
 // imageImportPrivileges are the vCenter privileges required for OVA import.
 var imageImportPrivileges = []string{
 	"VApp.Import",
@@ -387,7 +342,6 @@ func checkOVAURLReachable(ctx context.Context, ovaURL string) error {
 	}
 
 	return nil
->>>>>>> 83930ea1 (Add RHCOS OVA import automation for destination vCenter)
 }
 
 // sanitizeOVAURL strips query parameters from an OVA URL so that signed tokens
