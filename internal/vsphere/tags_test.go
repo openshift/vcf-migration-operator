@@ -346,7 +346,6 @@ func TestAttachFailureDomainTags(t *testing.T) {
 	})
 }
 
-<<<<<<< HEAD
 func TestObjectHasTagInCategory(t *testing.T) {
 	t.Run("rejects nil session", func(t *testing.T) {
 		_, err := ObjectHasTagInCategory(context.Background(), nil, "test-category", &object.Datacenter{})
@@ -369,61 +368,6 @@ func TestObjectHasTagInCategory(t *testing.T) {
 			}
 			if has {
 				t.Fatal("expected false for nonexistent category")
-=======
-func TestEnsureClusterTag(t *testing.T) {
-	t.Run("rejects nil session", func(t *testing.T) {
-		_, err := EnsureClusterTag(context.Background(), nil, "test-infra")
-		if err == nil {
-			t.Fatal("EnsureClusterTag succeeded, want nil session error")
-		}
-		if !strings.Contains(err.Error(), "session and TagManager must not be nil") {
-			t.Fatalf("EnsureClusterTag error = %q, want nil session detail", err.Error())
-		}
-	})
-
-	t.Run("creates category and tag", func(t *testing.T) {
-		simulator.Test(func(ctx context.Context, c *vim25.Client) {
-			s := newTestSession(ctx, t, c)
-
-			tagID, err := EnsureClusterTag(ctx, s, "my-cluster-abcd")
-			if err != nil {
-				t.Fatalf("EnsureClusterTag: %v", err)
-			}
-			if tagID == "" {
-				t.Fatal("EnsureClusterTag returned empty tag ID")
-			}
-
-			// Verify category exists with correct name and cardinality.
-			cat, err := s.TagManager.GetCategory(ctx, "openshift-my-cluster-abcd")
-			if err != nil {
-				t.Fatalf("GetCategory: %v", err)
-			}
-			if cat.Cardinality != "SINGLE" {
-				t.Fatalf("category cardinality = %q, want SINGLE", cat.Cardinality)
-			}
-
-			// Verify category has the required associable types for cluster tags.
-			requiredTypes := []string{virtualMachineType, resourcePoolType, folderType, datastoreType, storagePodType}
-			for _, rt := range requiredTypes {
-				found := false
-				for _, at := range cat.AssociableTypes {
-					if at == rt {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Fatalf("category AssociableTypes = %v, missing required type %q", cat.AssociableTypes, rt)
-				}
-			}
-
-			// Verify tag exists.
-			tag, err := s.TagManager.GetTag(ctx, tagID)
-			if err != nil {
-				t.Fatalf("GetTag: %v", err)
-			}
-			if tag.Name != "my-cluster-abcd" {
-				t.Fatalf("tag name = %q, want %q", tag.Name, "my-cluster-abcd")
 			}
 		})
 	})
@@ -507,7 +451,69 @@ func TestEnsureClusterTag(t *testing.T) {
 			}
 			if has {
 				t.Fatal("expected false when only a different category's tag is attached")
-=======
+			}
+		})
+	})
+}
+
+func TestEnsureClusterTag(t *testing.T) {
+	t.Run("rejects nil session", func(t *testing.T) {
+		_, err := EnsureClusterTag(context.Background(), nil, "test-infra")
+		if err == nil {
+			t.Fatal("EnsureClusterTag succeeded, want nil session error")
+		}
+		if !strings.Contains(err.Error(), "session and TagManager must not be nil") {
+			t.Fatalf("EnsureClusterTag error = %q, want nil session detail", err.Error())
+		}
+	})
+
+	t.Run("creates category and tag", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+
+			tagID, err := EnsureClusterTag(ctx, s, "my-cluster-abcd")
+			if err != nil {
+				t.Fatalf("EnsureClusterTag: %v", err)
+			}
+			if tagID == "" {
+				t.Fatal("EnsureClusterTag returned empty tag ID")
+			}
+
+			// Verify category exists with correct name and cardinality.
+			cat, err := s.TagManager.GetCategory(ctx, "openshift-my-cluster-abcd")
+			if err != nil {
+				t.Fatalf("GetCategory: %v", err)
+			}
+			if cat.Cardinality != "SINGLE" {
+				t.Fatalf("category cardinality = %q, want SINGLE", cat.Cardinality)
+			}
+
+			// Verify category has the required associable types for cluster tags.
+			requiredTypes := []string{virtualMachineType, resourcePoolType, folderType, datastoreType, storagePodType}
+			for _, rt := range requiredTypes {
+				found := false
+				for _, at := range cat.AssociableTypes {
+					if at == rt {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("category AssociableTypes = %v, missing required type %q", cat.AssociableTypes, rt)
+				}
+			}
+
+			// Verify tag exists.
+			tag, err := s.TagManager.GetTag(ctx, tagID)
+			if err != nil {
+				t.Fatalf("GetTag: %v", err)
+			}
+			if tag.Name != "my-cluster-abcd" {
+				t.Fatalf("tag name = %q, want %q", tag.Name, "my-cluster-abcd")
+			}
+		})
+	})
+
 	t.Run("is idempotent", func(t *testing.T) {
 		simulator.Test(func(ctx context.Context, c *vim25.Client) {
 			s := newTestSession(ctx, t, c)
