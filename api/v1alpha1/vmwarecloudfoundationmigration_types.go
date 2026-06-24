@@ -79,7 +79,6 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// CompletionTime is when the migration completed.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
-
 }
 
 // Condition type constants for the migration workflow.
