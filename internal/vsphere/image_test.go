@@ -155,7 +155,9 @@ func TestDownloadOVA(t *testing.T) {
 
 	t.Run("downloads and verifies SHA256", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(content))
+			if _, err := w.Write([]byte(content)); err != nil {
+				t.Errorf("writing response: %v", err)
+			}
 		}))
 		defer server.Close()
 
@@ -178,7 +180,9 @@ func TestDownloadOVA(t *testing.T) {
 		calls := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			calls++
-			w.Write([]byte(content))
+			if _, err := w.Write([]byte(content)); err != nil {
+				t.Errorf("writing response: %v", err)
+			}
 		}))
 		defer server.Close()
 
@@ -199,7 +203,9 @@ func TestDownloadOVA(t *testing.T) {
 
 	t.Run("rejects SHA256 mismatch", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("wrong-content"))
+			if _, err := w.Write([]byte("wrong-content")); err != nil {
+				t.Errorf("writing response: %v", err)
+			}
 		}))
 		defer server.Close()
 
@@ -231,7 +237,9 @@ func TestDownloadOVA(t *testing.T) {
 
 	t.Run("downloads without hash verification", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(content))
+			if _, err := w.Write([]byte(content)); err != nil {
+				t.Errorf("writing response: %v", err)
+			}
 		}))
 		defer server.Close()
 
@@ -247,7 +255,9 @@ func TestDownloadOVA(t *testing.T) {
 
 	t.Run("strips query params from filename", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(content))
+			if _, err := w.Write([]byte(content)); err != nil {
+				t.Errorf("writing response: %v", err)
+			}
 		}))
 		defer server.Close()
 

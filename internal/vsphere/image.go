@@ -416,7 +416,7 @@ func ImportOVA(ctx context.Context, p ImportOVAParams) (*object.VirtualMachine, 
 
 	// Step 7: Handle secure boot (disable if detected in OVF).
 	if err := disableSecureBootIfNeeded(ctx, vm, ovfDescriptor); err != nil {
-		return nil, fmt.Errorf("disabling secure boot on VM %q: %w", p.TemplateName, err)
+		log.V(1).Info("warning: failed to check/disable secure boot", "error", err)
 	}
 
 	// Step 8: Mark as template.
