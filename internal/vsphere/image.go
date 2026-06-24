@@ -130,24 +130,29 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 	if err != nil {
 		return "", fmt.Errorf("creating lock file %s: %w", lockPath, err)
 	}
-	defer lockFile.Close()
+	defer func() {
+		if err := lockFile.Close(); err != nil {
+			log.V(1).Info("failed to close lock file", "path", lockPath, "error", err)
+		}
+	}()
 
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
 		return "", fmt.Errorf("acquiring flock on %s: %w", lockPath, err)
 	}
 	defer func() {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
+			log.V(1).Info("failed to unlock flock", "path", lockPath, "error", err)
+		}
 	}()
 
 	// Check if cached file already exists with correct hash.
+	// Only reuse when a digest is available to verify the content;
+	// without a digest the filename alone cannot distinguish different source URLs.
 	if sha256Expected != "" {
 		if hash, err := hashFile(localPath); err == nil && hash == sha256Expected {
 			log.V(1).Info("OVA already cached with correct hash", "path", localPath)
 			return localPath, nil
 		}
-	} else if _, err := os.Stat(localPath); err == nil {
-		log.V(1).Info("OVA already cached (no hash verification)", "path", localPath)
-		return localPath, nil
 	}
 
 	// Download the OVA.
@@ -174,9 +179,16 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 		return "", fmt.Errorf("creating temp file for download: %w", err)
 	}
 	tmpPath := tmpFile.Name()
+	tmpClosed := false
 	defer func() {
-		tmpFile.Close()
-		os.Remove(tmpPath) // Clean up on failure; no-op if already renamed.
+		if !tmpClosed {
+			if err := tmpFile.Close(); err != nil {
+				log.V(1).Info("failed to close temp file", "path", tmpPath, "error", err)
+			}
+		}
+		if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+			log.V(1).Info("failed to remove temp file", "path", tmpPath, "error", err)
+		}
 	}()
 
 	hasher := sha256.New()
@@ -194,6 +206,7 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 	if err := tmpFile.Close(); err != nil {
 		return "", fmt.Errorf("closing temp file %s: %w", tmpPath, err)
 	}
+	tmpClosed = true
 
 	// Verify SHA256 if expected.
 	if sha256Expected != "" {
@@ -369,11 +382,6 @@ func ImportOVA(ctx context.Context, p ImportOVAParams) (*object.VirtualMachine, 
 		return nil, fmt.Errorf("importing VApp: %w", err)
 	}
 
-	info, err := lease.Wait(ctx, cisp.FileItem)
-	if err != nil {
-		return nil, fmt.Errorf("waiting for NFC lease: %w", err)
-	}
-
 	leaseCompleted := false
 	defer func() {
 		if !leaseCompleted {
@@ -382,6 +390,11 @@ func ImportOVA(ctx context.Context, p ImportOVAParams) (*object.VirtualMachine, 
 			}
 		}
 	}()
+
+	info, err := lease.Wait(ctx, cisp.FileItem)
+	if err != nil {
+		return nil, fmt.Errorf("waiting for NFC lease: %w", err)
+	}
 
 	updater := lease.StartUpdater(ctx, info)
 	defer updater.Done()
@@ -403,7 +416,7 @@ func ImportOVA(ctx context.Context, p ImportOVAParams) (*object.VirtualMachine, 
 
 	// Step 7: Handle secure boot (disable if detected in OVF).
 	if err := disableSecureBootIfNeeded(ctx, vm, ovfDescriptor); err != nil {
-		log.V(1).Info("warning: failed to check/disable secure boot", "error", err)
+		return nil, fmt.Errorf("disabling secure boot on VM %q: %w", p.TemplateName, err)
 	}
 
 	// Step 8: Mark as template.

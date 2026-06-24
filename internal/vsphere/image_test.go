@@ -602,10 +602,8 @@ func createTestOVAWithFiles(t *testing.T, files map[string]string) string {
 	if err != nil {
 		t.Fatalf("creating OVA: %v", err)
 	}
-	defer f.Close()
 
 	tw := tar.NewWriter(f)
-	defer tw.Close()
 
 	for name, content := range files {
 		header := &tar.Header{
@@ -619,6 +617,13 @@ func createTestOVAWithFiles(t *testing.T, files map[string]string) string {
 		if _, err := tw.Write([]byte(content)); err != nil {
 			t.Fatalf("writing tar content for %s: %v", name, err)
 		}
+	}
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("closing tar writer: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("closing OVA file: %v", err)
 	}
 
 	return ovaPath
@@ -636,10 +641,8 @@ func createTestOVA(t *testing.T, filename, content string) string {
 	if err != nil {
 		t.Fatalf("creating OVA file: %v", err)
 	}
-	defer f.Close()
 
 	tw := tar.NewWriter(f)
-	defer tw.Close()
 
 	header := &tar.Header{
 		Name: filename,
@@ -651,6 +654,13 @@ func createTestOVA(t *testing.T, filename, content string) string {
 	}
 	if _, err := tw.Write([]byte(content)); err != nil {
 		t.Fatalf("writing tar content: %v", err)
+	}
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("closing tar writer: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("closing OVA file: %v", err)
 	}
 
 	return ovaPath
