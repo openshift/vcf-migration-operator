@@ -76,7 +76,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		return "", fmt.Errorf("target credentials secret %s/%s not found: %w", ns, secretRef.Name, err)
 	}
 
-	support, err := openshift.GetVSphereMultiVCenterSupport(ctx, r.ConfigClient)
+	support, err := openshift.GetVSphereMultiVCenterSupport(ctx, r.ConfigClient, r.FeatureGateAccessor)
 	if err != nil {
 		return "", fmt.Errorf("checking cluster readiness: %w", err)
 	}

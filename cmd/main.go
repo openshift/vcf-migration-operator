@@ -43,6 +43,7 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/controller"
+	"github.com/openshift/vcf-migration-operator/internal/openshift"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -207,6 +208,7 @@ func main() {
 	}
 
 	restConfig := ctrl.GetConfigOrDie()
+	ctx := ctrl.SetupSignalHandler()
 
 	kubeClient, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
@@ -232,14 +234,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	featureGateAccessor, err := openshift.SetupFeatureGateAccessor(ctx, restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to initialize feature gate accessor")
+		os.Exit(1)
+	}
+
 	if err := (&controller.VmwareCloudFoundationMigrationReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		KubeClient:    kubeClient,
-		ConfigClient:  cfgClient,
-		MachineClient: machClient,
-		DynamicClient: dynClient,
-		Recorder:      mgr.GetEventRecorderFor("vcf-migration-controller"),
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		KubeClient:          kubeClient,
+		ConfigClient:        cfgClient,
+		FeatureGateAccessor: featureGateAccessor,
+		MachineClient:       machClient,
+		DynamicClient:       dynClient,
+		Recorder:            mgr.GetEventRecorderFor("vcf-migration-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VmwareCloudFoundationMigration")
 		os.Exit(1)
@@ -272,7 +281,7 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
