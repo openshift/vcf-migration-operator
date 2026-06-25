@@ -69,6 +69,11 @@ CONTAINER_TOOL ?= podman
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
+GO111MODULE = on
+export GO111MODULE
+GOFLAGS ?= -mod=vendor
+export GOFLAGS
+
 .PHONY: all
 all: build
 
@@ -106,6 +111,10 @@ fmt: ## Run go fmt against code.
 .PHONY: vet
 vet: ## Run go vet against code.
 	go vet ./...
+
+.PHONY: vendor
+vendor: ## Run go mod tidy, vendor, and verify.
+	hack/go-mod.sh
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.

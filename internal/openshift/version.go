@@ -19,9 +19,9 @@ const (
 // VSphereMultiVCenterSupport captures the cluster version and feature-gate state
 // relevant to migration preflight validation.
 type VSphereMultiVCenterSupport struct {
-	ClusterVersion    string
+	ClusterVersion     string
 	FeatureGateEnabled bool
-	UpgradeInProgress bool
+	UpgradeInProgress  bool
 }
 
 // GetVSphereMultiVCenterSupport returns the cluster version, feature-gate, and
@@ -52,9 +52,9 @@ func GetVSphereMultiVCenterSupport(ctx context.Context, client configclient.Inte
 	}
 
 	return &VSphereMultiVCenterSupport{
-		ClusterVersion:    version,
+		ClusterVersion:     version,
 		FeatureGateEnabled: enabled,
-		UpgradeInProgress: isClusterVersionProgressing(clusterVersion),
+		UpgradeInProgress:  isClusterVersionProgressing(clusterVersion),
 	}, nil
 }
 
