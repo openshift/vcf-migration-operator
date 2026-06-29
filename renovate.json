@@ -14,7 +14,8 @@
     "platformAutomerge": true,
     "addLabels": [
       "approved",
-      "lgtm"
+      "lgtm",
+      "ok-to-test"
     ]
   }
 }
