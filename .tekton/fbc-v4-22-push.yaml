@@ -1,0 +1,62 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  annotations:
+    build.appstudio.openshift.io/repo: https://github.com/openshift/vcf-migration-operator?rev={{revision}}
+    build.appstudio.redhat.com/commit_sha: '{{revision}}'
+    build.appstudio.redhat.com/target_branch: '{{target_branch}}'
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+    pipelinesascode.tekton.dev/on-cel-expression: event == "push" && target_branch
+      == "fbc"
+  creationTimestamp: null
+  labels:
+    appstudio.openshift.io/application: fbc-v4-22
+    appstudio.openshift.io/component: fbc-v4-22
+    pipelines.appstudio.openshift.io/type: build
+  name: fbc-v4-22-on-push
+  namespace: vcf-migration-operator-tenant
+spec:
+  params:
+  - name: dockerfile
+    value: Dockerfile
+  - name: git-url
+    value: '{{source_url}}'
+  - name: output-image
+    value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/fbc-v4-22/fbc-v4-22:{{revision}}
+  - name: path-context
+    value: .
+  - name: revision
+    value: '{{revision}}'
+  - name: hermetic
+    value: "true"
+  - name: build-args
+    value:
+      - 'BASE_IMAGE=registry.redhat.io/openshift4/ose-operator-registry-rhel9:v4.22'
+      - 'OCP_VERSION=fbc-v4-22'
+  taskRunTemplate:
+    serviceAccountName: build-pipeline-fbc-v4-22
+  pipelineRef:
+    resolver: git
+    params:
+    - name: url
+      value: https://github.com/openshift/vcf-migration-operator.git
+    - name: revision
+      value: main
+    - name: pathInRepo
+      value: .tekton/fbc-build-pipeline.yaml
+  workspaces:
+  - name: workspace
+    volumeClaimTemplate:
+      metadata:
+        creationTimestamp: null
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+      status: {}
+  - name: git-auth
+    secret:
+      secretName: '{{ git_auth_secret }}'
+status: {}
