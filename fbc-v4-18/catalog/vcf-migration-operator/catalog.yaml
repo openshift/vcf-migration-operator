@@ -1,0 +1,21 @@
+---
+schema: olm.package
+name: vcf-migration-operator
+defaultChannel: dev-preview
+description: |
+  The VCF Migration Operator automates migrating OpenShift clusters between VMware vCenters
+  (e.g. VMware Cloud Foundation / VCF), orchestrating infrastructure preparation, multi-site
+  configuration, machine migration, and source cleanup.
+---
+schema: olm.channel
+package: vcf-migration-operator
+name: dev-preview
+entries:
+  - name: vcf-migration-operator.v0.0.1
+---
+# TODO: Replace this placeholder with the actual rendered bundle.
+# Generate with: opm render <bundle-image> --output=yaml >> catalog.yaml
+schema: olm.bundle
+package: vcf-migration-operator
+name: vcf-migration-operator.v0.0.1
+image: # TODO: set to the bundle image reference (e.g. quay.io/redhat-user-workloads/vcf-migration-operator-tenant/vcf-migration-operator-bundle/vcf-migration-operator-bundle@sha256:...)
