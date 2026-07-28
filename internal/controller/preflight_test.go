@@ -361,6 +361,7 @@ func TestRunPreflightChecks(t *testing.T) {
 		mutateMigration           func(*migrationv1alpha1.VmwareCloudFoundationMigration)
 		wantMessageContains       string
 		wantErrContains           string
+		wantTransient             bool
 		wantTargetSecretReadCount int
 	}{
 		{
@@ -416,6 +417,7 @@ func TestRunPreflightChecks(t *testing.T) {
 			gateEnabled:               true,
 			progressing:               true,
 			wantErrContains:           "cluster upgrade is in progress",
+			wantTransient:             true,
 			wantTargetSecretReadCount: 1,
 		},
 		{
@@ -434,6 +436,7 @@ func TestRunPreflightChecks(t *testing.T) {
 				},
 			},
 			wantErrContains:           "cluster operators are not healthy",
+			wantTransient:             true,
 			wantTargetSecretReadCount: 1,
 		},
 		{
@@ -513,6 +516,9 @@ func TestRunPreflightChecks(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), tt.wantErrContains) {
 					t.Fatalf("runPreflightChecks error = %q, want substring %q", err.Error(), tt.wantErrContains)
+				}
+				if got := isTransientError(err); got != tt.wantTransient {
+					t.Fatalf("isTransientError(err) = %v, want %v", got, tt.wantTransient)
 				}
 			} else {
 				if err != nil {
