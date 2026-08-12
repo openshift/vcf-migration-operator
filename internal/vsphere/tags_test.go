@@ -603,7 +603,6 @@ func TestAttachClusterOwnershipTag(t *testing.T) {
 
 }
 
-
 func TestEnsureClusterTag(t *testing.T) {
 	t.Run("rejects incompatible existing category", func(t *testing.T) {
 		simulator.Test(func(ctx context.Context, c *vim25.Client) {
