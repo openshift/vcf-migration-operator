@@ -546,4 +546,33 @@ var _ = Describe("updateStatus", func() {
 		Expect(destCond.Status).To(Equal(metav1.ConditionTrue), "a later stale failure must not overwrite a committed success")
 		Expect(destCond.Reason).To(Equal(migrationv1alpha1.ReasonCompleted))
 	})
+
+	It("persists status.image so the image-import phase does not re-resolve on every reconcile", func() {
+		resource := newStatusTestResource()
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migration)).To(Succeed())
+		base := *migration.Status.DeepCopy()
+
+		migration.Status.Image = &migrationv1alpha1.ImageStatus{
+			ResolvedOVAUrl: "https://example.com/rhcos.ova",
+			ResolvedSHA256: "deadbeef",
+			URLSource:      migrationv1alpha1.ImageURLSourceAuto,
+		}
+		Expect(reconciler.updateStatus(ctx, migration, base)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+
+		Expect(final.Status.Image).NotTo(BeNil(), "status.image must survive updateStatus, otherwise ensureDestinationImageImported re-resolves and never progresses past phase 2")
+		Expect(final.Status.Image.ResolvedOVAUrl).To(Equal("https://example.com/rhcos.ova"))
+		Expect(final.Status.Image.ResolvedSHA256).To(Equal("deadbeef"))
+		Expect(final.Status.Image.URLSource).To(Equal(migrationv1alpha1.ImageURLSourceAuto))
+	})
 })
