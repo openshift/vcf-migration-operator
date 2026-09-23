@@ -94,19 +94,20 @@ spec:
         - apiGroups:
           - ""
           resources:
-          - events
-          verbs:
-          - create
-          - patch
-        - apiGroups:
-          - ""
-          resources:
           - nodes
           - persistentvolumes
           verbs:
           - get
           - list
           - watch
+        - apiGroups:
+          - ""
+          - events.k8s.io
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
         - apiGroups:
           - apps
           resources:
@@ -212,6 +213,18 @@ spec:
           - get
           - patch
           - update
+        - apiGroups:
+          - networking.k8s.io
+          resources:
+          - networkpolicies
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
         - apiGroups:
           - operator.openshift.io
           resources:
