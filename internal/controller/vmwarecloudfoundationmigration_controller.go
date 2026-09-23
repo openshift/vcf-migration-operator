@@ -1595,6 +1595,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		if migration.Status.CompletionTime != nil && latest.Status.CompletionTime == nil {
 			latest.Status.CompletionTime = migration.Status.CompletionTime
 		}
+		if migration.Status.Image != nil {
+			latest.Status.Image = migration.Status.Image
+		}
 		return r.Status().Update(ctx, latest)
 	})
 	if err != nil {
