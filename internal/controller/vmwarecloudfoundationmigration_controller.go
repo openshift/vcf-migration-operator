@@ -111,6 +111,8 @@ var conditionOrder = []string{
 const (
 	reasonWaitingForVSpherePods = "WaitingForVSpherePods"
 
+	machineSetOSStreamLabelKey = "machineconfiguration.openshift.io/osstream"
+
 	// ovaDownloadTimeout is the maximum duration for OVA file download.
 	// RHCOS OVAs are ~800MB–1.2GB; 15 minutes allows for slow networks.
 	ovaDownloadTimeout = 15 * time.Minute
@@ -581,18 +583,30 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	}
 
 	// Phase 2: Resolve OVA URL. Re-resolve when the user corrects
-	// spec.image.ovaUrl, or clears it to fall back to ConfigMap
-	// auto-resolution, so a stored stale URL does not keep being used.
+	// spec.image.ovaUrl, clears it, or the source MachineSet stream changed.
 	specURL := migration.Spec.Image.OVAUrl
-	if needsOVAReresolution(specURL, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.URLSource) {
+	streamName := ""
+	if specURL == "" {
+		machineMgr := openshift.NewMachineManager(r.KubeClient, r.MachineClient, r.DynamicClient)
+		sourceVC, err := infraMgr.GetSourceVCenter(ctx)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("getting source vCenter for RHCOS stream: %w", err)
+		}
+		streamName, err = sourceMachineSetOSStream(ctx, machineMgr, sourceVC.Server)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("getting source MachineSet RHCOS stream: %w", err)
+		}
+	}
+	if needsOVAReresolution(specURL, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.URLSource, migration.Status.Image.ResolvedOSStream, streamName) {
 		migration.Status.Image.ResolvedSHA256 = ""
 		if specURL != "" {
 			// User-provided URL.
 			migration.Status.Image.ResolvedOVAUrl = specURL
+			migration.Status.Image.ResolvedOSStream = ""
 			migration.Status.Image.URLSource = migrationv1alpha1.ImageURLSourceUser
 			log.V(1).Info("using user-provided OVA URL", "url", vsphere.SanitizeOVAURL(specURL))
 		} else {
-			// Resolve from coreos-bootimages ConfigMap.
+			// An empty stream preserves the legacy release-4.20 single-stream behavior.
 			cm, err := r.KubeClient.CoreV1().ConfigMaps(mcoNamespace).Get(ctx, "coreos-bootimages", metav1.GetOptions{})
 			if err != nil {
 				r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed,
@@ -600,7 +614,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 				return ctrl.Result{}, fmt.Errorf("getting coreos-bootimages ConfigMap: %w", err)
 			}
 
-			ova, err := vsphere.ResolveRHCOSOVAFromConfigMap(cm, rhcosArchAMD64)
+			ova, err := vsphere.ResolveRHCOSOVAFromConfigMap(cm, rhcosArchAMD64, streamName)
 			if err != nil {
 				r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed,
 					fmt.Sprintf("Failed to resolve RHCOS OVA from stream metadata: %v", err))
@@ -609,8 +623,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 
 			migration.Status.Image.ResolvedOVAUrl = ova.Location
 			migration.Status.Image.ResolvedSHA256 = ova.Sha256
+			migration.Status.Image.ResolvedOSStream = streamName
 			migration.Status.Image.URLSource = migrationv1alpha1.ImageURLSourceAuto
-			log.V(1).Info("resolved RHCOS OVA from stream metadata", "url", vsphere.SanitizeOVAURL(ova.Location), "sha256", ova.Sha256)
+			log.V(1).Info("resolved RHCOS OVA from stream metadata", "url", vsphere.SanitizeOVAURL(ova.Location), "sha256", ova.Sha256, "stream", streamName)
 		}
 
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
@@ -677,6 +692,32 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 		r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ConditionDestinationImageImported, migrationv1alpha1.ConditionDestinationImageImported, msg)
 	}
 	return ctrl.Result{}, nil
+}
+
+func sourceMachineSetOSStream(ctx context.Context, machineMgr *openshift.MachineManager, sourceVCenter string) (string, error) {
+	machineSets, err := machineMgr.GetMachineSetsByVCenter(ctx, sourceVCenter)
+	if err != nil {
+		return "", err
+	}
+	return rhcosStreamFromMachineSets(machineSets)
+}
+
+func rhcosStreamFromMachineSets(machineSets []*machinev1beta1.MachineSet) (string, error) {
+	streamName := ""
+	for _, machineSet := range machineSets {
+		candidate := machineSet.Labels[machineSetOSStreamLabelKey]
+		if candidate == "" {
+			candidate = machineSet.Spec.Template.Labels[machineSetOSStreamLabelKey]
+		}
+		if candidate == "" {
+			continue
+		}
+		if streamName != "" && streamName != candidate {
+			return "", fmt.Errorf("source MachineSets use multiple RHCOS streams: %q and %q", streamName, candidate)
+		}
+		streamName = candidate
+	}
+	return streamName, nil
 }
 
 // importOVATemplate imports the RHCOS OVA as a VM template for the first
@@ -859,18 +900,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 }
 
 // needsOVAReresolution reports whether the OVA URL must (re)resolve: nothing
-// has been resolved yet, the user changed spec.image.ovaUrl, or the user
-// cleared a previously user-supplied URL (urlSource == ImageURLSourceUser) to fall back to
-// ConfigMap auto-resolution. A URL that was auto-resolved or is unchanged is
-// left stable.
-func needsOVAReresolution(specURL, resolvedURL string, urlSource migrationv1alpha1.ImageURLSource) bool {
+// has been resolved yet, the user changed spec.image.ovaUrl, the user cleared a
+// previously user-supplied URL, or the source MachineSet stream changed.
+func needsOVAReresolution(specURL, resolvedURL string, urlSource migrationv1alpha1.ImageURLSource, resolvedStream, sourceStream string) bool {
 	if resolvedURL == "" {
 		return true
 	}
 	if specURL != "" && resolvedURL != specURL {
 		return true
 	}
-	return specURL == "" && urlSource == migrationv1alpha1.ImageURLSourceUser
+	return specURL == "" && (urlSource == migrationv1alpha1.ImageURLSourceUser ||
+		(urlSource == migrationv1alpha1.ImageURLSourceAuto && resolvedStream != sourceStream))
 }
 
 // populateTopologyTemplates fills each failure domain's topology.template from
