@@ -1,0 +1,12 @@
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: vcf-migration-operator-fbc-mirrors
+spec:
+  imageDigestMirrors:
+    - source: registry.redhat.io/vcf-migration-operator-tech-preview/vcf-migration-operator-bundle
+      mirrors:
+        - quay.io/redhat-user-workloads/vcf-migration-operator-tenant/vcf-migration-operator-bundle-main
+    - source: registry.redhat.io/vcf-migration-operator-tech-preview/vcf-migration-rhel9-operator
+      mirrors:
+        - quay.io/redhat-user-workloads/vcf-migration-operator-tenant/vcf-migration-operator-main
