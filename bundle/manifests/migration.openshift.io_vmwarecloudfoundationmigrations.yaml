@@ -312,6 +312,15 @@ spec:
           status:
             description: status defines the observed state of VmwareCloudFoundationMigration.
             properties:
+              completionSpecHash:
+                description: |-
+                  completionSpecHash is the lowercase hex SHA-256 of encoding/json.Marshal
+                  of the typed spec when Ready=True is established. With Ready=True and
+                  completionTime, a matching hash authorizes automatic record release even
+                  when deletion increments generation. When omitted, administrator handoff
+                  is required to release the record.
+                pattern: ^[a-f0-9]{64}$
+                type: string
               completionTime:
                 description: completionTime is when the migration completed.
                 format: date-time
@@ -320,8 +329,9 @@ spec:
                 description: |-
                   conditions represent the current state of the migration.
                   Known conditions are:
-                  - Accepted: admission gate; True is normal for the single reconciled instance (cluster),
-                    while False indicates an unsupported object name.
+                  - Accepted: admission gate; True is normal for the single reconciled instance
+                    (openshift-vcf-migration/cluster), while False indicates an unsupported
+                    object name or namespace.
                   - InfrastructurePrepared: preflight validation and migration path selection.
                   - DestinationInitialized: destination vCenter folders and tags created.
                   - MultiSiteConfigured: cluster configured for both source and target vCenters.
