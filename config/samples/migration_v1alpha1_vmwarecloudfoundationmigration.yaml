@@ -10,6 +10,30 @@ spec:
   targetVCenterCredentialsSecret:
     name: target-vcenter-creds
     namespace: openshift-vcf-migration
+  # nodeMigration controls the selected node-migration API shape.
+  # Omitting it retains the legacy MachineSet/CPMS replacement path.
+  #
+  # Legacy IPI cluster — omit nodeMigration, or set both roles to Recreate:
+  # nodeMigration:
+  #   workers:
+  #     type: Recreate
+  #   controlPlane:
+  #     type: Recreate
+  #
+  # VMotion API shape only; backend execution is not implemented.
+  # For VMotion, remove topology.template from failureDomains and set the same
+  # explicit mode for both roles. Auto and omitted mode are invalid.
+  # nodeMigration:
+  #   workers:
+  #     type: VMotion
+  #     vmotion:
+  #       mode: Hot              # Hot | Cold
+  #     maxUnavailable: 1
+  #   controlPlane:
+  #     type: VMotion
+  #     vmotion:
+  #       mode: Hot
+  #     maxUnavailable: 1
   failureDomains:
     - name: target-fd-1
       region: target-region
