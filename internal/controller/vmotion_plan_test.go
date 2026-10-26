@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -672,6 +674,29 @@ func TestVMotionMachineEligibilityBlocksConflictingBindings(t *testing.T) {
 	second.Name = "machine-b"
 	if err := validateVMotionMachineEligibility(identities, []machinev1beta1.Machine{*first, *second}); err == nil || !strings.Contains(err.Error(), "multiple Machines") {
 		t.Fatalf("duplicate Machine binding error = %v, want multiple Machines", err)
+	}
+}
+
+func TestVMotionInventoryRejectsUntrustedSourceCertificate(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	serverName := strings.TrimPrefix(server.URL, "https://")
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: openshift.VSphereCredsSecretName, Namespace: openshift.VSphereCredsSecretNamespace},
+		Data: map[string][]byte{
+			serverName + ".username": []byte("user"),
+			serverName + ".password": []byte("password"),
+		},
+	}
+	r := &VmwareCloudFoundationMigrationReconciler{KubeClient: fakekube.NewClientset(secret)}
+	_, err := r.listVMotionVMInventory(
+		context.Background(),
+		&configv1.VSpherePlatformVCenterSpec{Server: serverName, Datacenters: []string{vmotionPlanTestSourceDatacenter}},
+		nil,
+		[]string{"11111111-1111-4111-8111-111111111111"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "certificate signed by unknown authority") {
+		t.Fatalf("listVMotionVMInventory error = %v, want untrusted TLS certificate rejection", err)
 	}
 }
 

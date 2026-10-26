@@ -140,6 +140,8 @@ Leave the target host unset so the destination cluster selects it. Do not interp
 
 Before disruption, establish credentials/trust and applicable rights on the relevant source/destination entities using the existing authorization-checking pattern. Check permission alone is insufficient: `CheckRelocate_Task` documents `System.View`, while actual relocation/shutdown/power-on require additional rights, including conditional target placement permissions.
 
+Source-inventory reads must also verify the vCenter certificate against the operator's configured system trust; an untrusted endpoint blocks planning before credentials or inventory are accepted.
+
 Use the documented rights for the actual selected APIs/specification, not an Administrator-role requirement or role-management framework. Qualify rights dependent on destination registration/inheritance and recheck against actual entities where needed; do not claim unavailable future-entity checks have already succeeded.
 
 ### Hot
