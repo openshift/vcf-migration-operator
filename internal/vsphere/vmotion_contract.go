@@ -5,23 +5,31 @@ import "context"
 // VMotionManagedObjectReference identifies one vSphere object within a vCenter
 // and datacenter scope.
 type VMotionManagedObjectReference struct {
-	VCenter    string
+	// VCenter is the configured vCenter server that owns the local reference.
+	VCenter string
+	// Datacenter is the inventory scope in which the reference was resolved.
 	Datacenter string
-	Type       string
-	Value      string
+	// Type is the managed-object reference type returned by vSphere.
+	Type string
+	// Value is the vCenter-local managed-object identifier.
+	Value string
 }
 
 // VMotionSourceFailureDomain supplies one configured source failure domain's
 // name and compute-resource inventory path for scoped reference resolution.
 type VMotionSourceFailureDomain struct {
-	Name                string
+	// Name is the source failure-domain name.
+	Name string
+	// ComputeResourcePath is topology.computeCluster's inventory path.
 	ComputeResourcePath string
 }
 
 // VMotionInventory contains VM matches and each source failure domain's
 // resolved compute-resource reference. Duplicate VM UUID matches are retained.
 type VMotionInventory struct {
-	VMs                           []VMotionVM
+	// VMs contains all requested UUID matches, including duplicate matches.
+	VMs []VMotionVM
+	// SourceFailureDomainReferences maps source FD names to resolved references.
 	SourceFailureDomainReferences map[string]VMotionManagedObjectReference
 }
 
@@ -29,18 +37,26 @@ type VMotionInventory struct {
 // checks and relocation. Host is intentionally absent; destination DRS selects
 // the host, which is recorded from observation after relocation.
 type VMotionPlacement struct {
-	VCenter       string
-	Datacenter    string
+	// VCenter is the destination vCenter server.
+	VCenter string
+	// Datacenter is the destination vCenter datacenter.
+	Datacenter string
+	// FailureDomain is the selected destination FD name.
 	FailureDomain string
-	ResourcePool  string
-	Datastore     string
-	Network       string
+	// ResourcePool is the selected destination pool path.
+	ResourcePool string
+	// Datastore is the selected destination datastore path.
+	Datastore string
+	// Network is the selected destination network path.
+	Network string
 }
 
 // VMotionTaskReference scopes a task ID to the vCenter that created it.
 type VMotionTaskReference struct {
+	// OwnerVCenter is the vCenter that created TaskID.
 	OwnerVCenter string
-	TaskID       string
+	// TaskID is local to OwnerVCenter.
+	TaskID string
 }
 
 // VMotionSubmissionState reports whether a mutation submission was
@@ -59,19 +75,24 @@ const (
 // TaskReference is absent for ShutdownGuest and may be absent when State is
 // Unknown. Unknown means submission may have begun and must not be replayed.
 type VMotionSubmission struct {
-	State         VMotionSubmissionState
+	// State reports whether submission was acknowledged or remains ambiguous.
+	State VMotionSubmissionState
+	// TaskReference is scoped to the vCenter that created the task, if available.
 	TaskReference *VMotionTaskReference
 }
 
 // VMotionFinding is one bounded result from the native relocation checker.
 type VMotionFinding struct {
+	// Severity is the vSphere finding severity.
 	Severity string
-	Message  string
+	// Message is a bounded sanitized finding description.
+	Message string
 }
 
 // VMotionCheckResult contains per-VM/host findings; a successful API task alone
 // does not imply compatibility.
 type VMotionCheckResult struct {
+	// Findings are the per-VM and host compatibility findings.
 	Findings []VMotionFinding
 }
 
@@ -91,7 +112,9 @@ const (
 
 // VMotionTaskObservation contains bounded task state, not full task output.
 type VMotionTaskObservation struct {
-	State  VMotionTaskState
+	// State is the latest authoritative state observed for the owning task.
+	State VMotionTaskState
+	// Reason is a bounded sanitized explanation.
 	Reason string
 }
 
@@ -100,7 +123,7 @@ type VMotionTaskObservation struct {
 // across pause or generation changes, bound to the same CR UID, execution ID,
 // and action ID. That permission never authorizes a new mutation.
 type VMotionReadOnlyBackend interface {
-	// ListVMotionVMInventory performs a read-only BIOS-UUID inventory search scoped to one datacenter.
+	// ListVMotionVMInventory resolves source compute-resource references and performs a read-only BIOS-UUID search in one datacenter.
 	ListVMotionVMInventory(ctx context.Context, vcenter, datacenter string, sourceFailureDomains []VMotionSourceFailureDomain, biosUUIDs []string) (VMotionInventory, error)
 	// CheckRelocate performs a read-only native feasibility check for the exact frozen placement.
 	CheckRelocate(ctx context.Context, sourceVCenter, sourceDatacenter, biosUUID string, target VMotionPlacement) (VMotionCheckResult, error)

@@ -26,7 +26,7 @@
 
 ## Review Focus
 
-- **Pre-processing mapping contract:** PR #219 proposes `status.failureDomainMappings` as the effective mapping. VMotion must consume that output without assuming one-to-one cardinality, while still requiring an unambiguous target for each planned node.
+- **Pre-processing/source-FD contract:** PR #219 proposes `status.failureDomainMappings` as the effective mapping. VMotion consumes that output without its own cardinality rule, while each Node's `VirtualMachine.resourcePool.owner` must match exactly one source FD reference resolved from `topology.computeCluster` in the configured source vCenter/datacenter.
 - **Observation after pause/spec change:** `internal/controller/execution.go` currently gates mutations on Running state and generation. Result observation/persistence for an already-claimed action must not reuse that mutation-only gate.
 - **Parallel PR contract:** PRs 3 and 4 can proceed independently only after PR 2 records the shared action, identity, and backend contract; otherwise their state/result types can diverge.
 - **Credential cache correctness:** `internal/vsphere/session.go` caches sessions by server/datacenter/username, excluding password and TLS policy. Verify VMotion calls cannot reuse an authenticated session after credential/trust changes.
@@ -75,16 +75,17 @@ PR 1 and PR #219 both change API types and generated CRD/bundle artifacts. Coord
 
 **Depends on:** PR 1 API contract and PR #219's effective mapping result (or an agreed equivalent pre-processing contract).
 
-**Files:** `internal/controller/vmwarecloudfoundationmigration_controller.go`, new `internal/controller/vmotion_plan.go` and focused tests, plus `internal/controller/preflight.go` only where dispatch requires it.
+**Files:** `internal/controller/vmwarecloudfoundationmigration_controller.go`, new `internal/controller/vmotion_plan.go` and focused tests, read-only source inventory in `internal/vsphere/list.go` with simulator tests, and `docs/dev/node-migration-api.md` for the shared PR 3/4 contract.
 
-- [ ] Dispatch explicit VMotion before template/probe requirements, MachineSet/CPMS creation/scaling/deletion, and Machine-derived progress checks. Leave omitted selection and Recreate on their existing path.
-- [ ] Check canonical namespace/name before preparation or migration side effects. Unsupported explicit requests return actionable blocked status and do not fall through to replacement behavior.
-- [ ] Consume the immutable effective `status.failureDomainMappings` produced by pre-processing; do not recompute it from FD counts/names or `workerMachineSetNames`, and do not impose a one-to-one mapping rule in VMotion. Block if the result cannot select one target FD for a planned node.
-- [ ] Resolve every planned Node to one unique VM using the qualified providerID/BIOS-UUID identity contract; classify Managed, VerifiedUnmanaged, or Indeterminate, and block relevant conflicting provisioning. Do not require a globally empty Machine inventory.
-- [ ] Freeze CR UID/execution identity, source/destination, mode, per-node role/Node UID/providerID/VM identity, selected target failure domain/host/pool/datastore/network, and original cordon state before configuration changes. Keep the effective mapping in its existing preprocessing status field rather than duplicating it in the VMotion API; preserve the frozen source identity for later cleanup.
-- [ ] Validate plan stability on reconcile; do not silently adopt added/replaced nodes, changed identity, or changed mapping. Leave the path blocked until the frozen plan is valid.
-- [ ] Define and document the small shared plan/action/backend contract consumed by PRs 3 and 4 (including task ownership, ambiguity, and read-only versus mutating calls) before parallel implementation proceeds.
-- [ ] Test no side effects for missing/ambiguous preprocessing output, ambiguous VM identity, unsupported scope, Machine-managed nodes, relevant provisioning conflicts, and changed mapping; test the supplied mapping is preserved and the frozen per-node plan survives restart/reconcile.
+- [x] Dispatch explicit VMotion before template/probe requirements, MachineSet/CPMS creation/scaling/deletion, and Machine-derived progress checks. Leave omitted selection and Recreate on their existing path.
+- [x] Check canonical namespace/name before preparation or migration side effects. Unsupported explicit requests return actionable blocked status and do not fall through to replacement behavior.
+- [x] Retain configured source-FD, supported-type, one-source-vCenter, and valid source-to-destination mapping checks. Resolve every source FD's `topology.computeCluster` path to a vCenter managed-object reference in the configured datacenter; reject duplicate type/ID references. Consume the immutable effective `status.failureDomainMappings` and do not add VMotion-specific cardinality constraints.
+- [x] For every planned Node, resolve its unique source VM and `resourcePool.owner`; match the owner to exactly one resolved source-FD reference by vCenter, reference type/ID, and datacenter scope. Do not use resource-pool path/name as a tiebreaker or impose a `ClusterComputeResource` type gate. If the Node zone label is present, require equality with the matched FD's Zone.
+- [x] Resolve every planned Node to one unique VM using the qualified providerID/BIOS-UUID identity contract; classify Machine ownership per supported NodeRef UID, providerID, and annotation associations, and block active provisioning. Do not require a globally empty Machine inventory.
+- [x] Freeze CR UID/execution identity, source/destination, mode, per-node role/Node UID/providerID/VM identity, source FD and owner reference, selected mapping, target FD/pool/datastore/network, and original cordon state before configuration changes. Include source FD/owner reference in the sanitized plan fingerprint; keep the effective mapping in its existing preprocessing status field. Leave destination host unset for DRS and record its observed value after relocation.
+- [x] Validate plan stability on reconcile; do not silently adopt added/replaced nodes, changed identity, owner reference, or mapping. Leave the path blocked until the frozen plan is valid.
+- [x] Define and document the small shared plan/action/backend contract consumed by PRs 3 and 4 (including task ownership, ambiguity, and read-only versus mutating calls) before parallel implementation proceeds.
+- [x] Test no side effects for missing/ambiguous preprocessing output, duplicate source compute-resource references, missing/ambiguous resource-pool owners, zone mismatch, ambiguous VM identity, unsupported scope, Machine-managed nodes, active provisioning conflicts, and changed owner/mapping; test the supplied mapping is preserved and the frozen per-node plan survives restart/reconcile.
 
 **Merge gate:** Explicit dispatch and read-only plan creation are safe; unsupported/ambiguous requests stop before migration side effects; no vSphere mutation is enabled.
 

@@ -17,7 +17,7 @@ The first delivery retains the narrow baseline:
 - One NIC per node VM; administrator-prepared destination networking that supports the existing configuration. No readdressing, address-family conversion, subnet cutover, or network repair.
 - Explicit `VMotion` selection and the same explicitly selected `Hot` or `Cold` mode for workers and control plane. No `Auto`, mixed modes, or automatic fallback.
 - One node workflow and one mutating VM action in flight cluster-wide. Workers precede control-plane nodes; use a stable order within each role.
-- Explicit target host/pool/datastore in the execution specification. Use qualified native compatibility checks, not a custom placement optimizer or exhaustive hardware validator.
+- Explicit target resource pool/datastore/network in the execution specification. Leave the relocate host unset for destination-cluster DRS placement and record the observed host after relocation. Use qualified native compatibility checks, not a custom placement optimizer or exhaustive hardware validator.
 - No MachineSet/CPMS lifecycle operations on this path. Excluding Machine-managed VMotion is a first-release policy, not a claim that vSphere cannot move those VMs.
 
 **No mandatory temporary probe VM for UPI VMotion.** No probe template, probe DHCP/static address configuration, or image-import step is required for this path. Do not remove or repurpose legacy template fields or change the existing probe in the recreation path.
@@ -50,6 +50,16 @@ The invariants are:
 The shared pre-processing step resolves, validates and records the effective source-to-destination FD mapping in `status.failureDomainMappings` before Infrastructure/configuration changes or node disruption. UPI VMotion consumes that recorded result; it does not independently infer a mapping from FD counts/names or MachineSet names, add a second mapping API, or impose its own mapping-cardinality rule. PR #219 currently proposes a complete one-to-one mapping for multi-domain migrations; that is the mapping behavior of that pre-processing implementation, not a VMotion requirement. VMotion should remain compatible with other mapping cardinalities if the pre-processing result unambiguously selects a destination for each planned node.
 
 Before mutation, bind every planned VM to the target FD selected by the effective mapping and freeze that per-node placement, along with Node/VM and source-cleanup identities. Execution and retries reuse those choices and revalidate the destination without selecting new placement. If the mapping result cannot unambiguously select a target for a planned node, block before side effects. Do not treat `status.workerMachineSetNames` as VMotion identity or completion evidence; that field belongs to the worker MachineSet replacement path.
+
+### Updated source-FD selection
+
+During preflight, resolve every configured source FD's `topology.computeCluster` path in the single configured source vCenter/datacenter and associate the resulting managed-object reference with its FD `Name`. Reject two source FDs that resolve to the same reference; do not use resource pool as a tiebreaker.
+
+For every planned Node, including single-FD clusters, first resolve the unique source VM by the agreed providerID/BIOS-UUID identity contract. Read `VirtualMachine.resourcePool`, then its `ResourcePool.owner`. Missing values or failed reads block. Match the owner to resolved source-FD references by vCenter, reference type and identifier, and verified datacenter scope; require exactly one match. Do not require a particular compute-resource reference type. If the Node has `topology.kubernetes.io/zone`, it must equal the matched FD's `Zone`; an absent label is allowed.
+
+Use the matched FD `Name` as the source key for `status.failureDomainMappings`. Freeze the source VM identity, owner reference, selected source mapping, and destination placement in the per-node plan fingerprint. On each pre-execution reconcile, compare the newly observed owner and identity to the frozen values; changed ownership blocks without adopting a remapped plan. After relocation, verify the frozen destination and do not re-run source-FD selection. This workflow selects the mapping only; destination compatibility checks remain separate.
+
+This owner-reference selection workflow is agreed in principle but has not yet been runtime-tested against the intended environment. Unit/simulator results do not establish that production inventory and topology match this contract.
 
 Existing legacy and explicit `Recreate` mapping behavior described in [PR #219](https://github.com/openshift/vcf-migration-operator/pull/219) remains unchanged. No VMotion-specific single-FD or one-to-one restriction is introduced. Coordinate API/schema integration with PR #105 and PR #219 so the VMotion API accepts the FD sets supported by pre-processing and consumes its effective mapping result; do not duplicate or override the pre-processing mapping contract. This does not establish topology qualification.
 
@@ -110,13 +120,13 @@ Separately gate provisioning/replacement that can change the cluster's Node/VM i
 
 An unhealthy Machine API or zero Running Machines alone is never proof of UPI. Do not automatically delete/adopt/disable Machine resources or clear Node associations.
 
-Resolve all planned Nodes to their unique expected source VMs using the qualified providerID/BIOS-UUID identity contract, not an assumption that Node and VM names match. Freeze Node UID/providerID, VM identity, role, source placement, intended target mapping, and original scheduling state. Exact association fields/resource scope remain implementation-review work.
+Resolve all planned Nodes to their unique expected source VMs using the qualified providerID/BIOS-UUID identity contract, not an assumption that Node and VM names match. Freeze Node UID/providerID, VM identity, role, selected source FD/owner reference, intended target mapping, and original scheduling state. Establish Machine ownership per planned Node using supported NodeRef UID, providerID, and Node annotation associations.
 
 ## 6. Native feasibility and per-node sequences
 
 Use `CheckRelocate_Task` against the intended VM/specification; omit `testType` to request all native tests. The documented groups cover source/host checks, destination datastore visibility, NIC-target network visibility, and resource-pool support. Do not promote those group descriptions into an exhaustive version-independent compatibility guarantee.
 
-Choose an explicit target host with a simple deterministic procedure and native checks. Do not interpret another candidate's pass as approval for the selected host. Revalidate changed identity, placement, or specifications. Do not build a custom capacity/placement optimizer.
+Leave the target host unset so the destination cluster selects it. Do not interpret another candidate's pass as approval for the selected target specification. Revalidate frozen identity, destination placement, and specifications; after relocation, record and verify the observed host. Do not build a custom capacity/placement optimizer.
 
 ### Result handling
 
@@ -295,7 +305,7 @@ Recovery acknowledgement and deletion handoff do not independently authorize cle
 ### Native checks and submission uncertainty
 
 - Successful check task with applicable fatal findings blocks; warning-only findings follow nonfatal policy; uninterpretable/mismatched results do not pass. Qualify empty results.
-- Another host/spec passing cannot authorize the selected host/spec; changed placement/mapping invalidates old evidence.
+- Feasibility findings must apply to the frozen target FD/pool/datastore/network. After relocation, verify the DRS-selected host against the frozen destination cluster; changed placement/mapping invalidates old evidence.
 - Missing known action privileges/trust blocks before disruption. Qualify registration-dependent permissions and selected power-on API behavior.
 - Exercise claim/status-ack/call/task-persistence crash windows, leader handoff, and SDK retry behavior. Claimed/no-task uncertainty never triggers blind replay.
 - Combined drill: submit, pause before result persistence, restart, and introduce another CR; observe/intervene on the original action, not a duplicate.
