@@ -75,6 +75,8 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	// checkNetworkingViaProbeVMsFunc overrides the probe-VM networking check in
 	// tests; nil selects the real implementation.
 	checkNetworkingViaProbeVMsFunc func(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, sourceVC *configv1.VSpherePlatformVCenterSpec) error
+	// vmotionInventoryFunc overrides the read-only source VM inventory lookup in tests.
+	vmotionInventoryFunc func(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, sourceFailureDomains []configv1.VSpherePlatformFailureDomainSpec, biosUUIDs []string) (vsphere.VMotionInventory, error)
 
 	// lastStallEventKey identifies the set of old worker machines described by the
 	// most recent OldWorkersStalled Warning event; lastStallEventTime is when that
@@ -295,6 +297,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
+	}
+
+	if hasVMotionSelection(migration) {
+		return r.reconcileVMotionPlan(ctx, migration, baseStatus)
 	}
 
 	// If resuming from Paused, clear the Paused condition on Ready and set it to Progressing.
@@ -1636,6 +1642,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			latest.Status.FailureDomainMappings = migration.Status.FailureDomainMappings
 			hasChanges = true
 		}
+		if mergeInitialNodeMigrationPlan(migration, latest, baseStatus) {
+			hasChanges = true
+		}
 		// Worker MachineSet names are append-only: merge this reconcile's
 		// newly recorded names into latest so they persist before cleanup can
 		// delete the source MachineSets they were derived from.
@@ -1669,6 +1678,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		return fmt.Errorf("updating migration status: %w", err)
 	}
 	return nil
+}
+
+// mergeInitialNodeMigrationPlan publishes the first frozen VMotion plan only
+// when no concurrent reconcile has already committed one.
+func mergeInitialNodeMigrationPlan(migration, latest *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) bool {
+	if migration.Status.NodeMigration == nil || baseStatus.NodeMigration != nil || latest.Status.NodeMigration != nil ||
+		migration.Generation != latest.Generation || migration.UID != latest.UID {
+		return false
+	}
+	latest.Status.NodeMigration = migration.Status.NodeMigration.DeepCopy()
+	return true
 }
 
 // mergeCompletionRecord binds completion atomically to the spec that this

@@ -8,12 +8,11 @@ structure.
 Counts and summary strings describe observations; they are not authority to
 replay an operation.
 
-> **API foundation only.** The controller does not implement the VMotion
-> execution contract. Schema support does not enable migration execution or
-> establish runtime ownership, health, action safety, task outcome, or recovery
-> authorization. Do not use an explicit VMotion selection as evidence that the
-> backend supports it. Runtime dispatch, durable action claims, status merging,
-> recovery enforcement and qualification remain follow-up work.
+> **Bounded runtime foundation.** The controller implements explicit VMotion
+> dispatch, eligibility checks, and read-only frozen-plan creation. It does not
+> mutate VMs or run the node migration workflow. The full action state machine,
+> recovery enforcement, control-plane health gates, cleanup, and qualification
+> remain follow-up work.
 
 ## Selection and validation
 
@@ -55,6 +54,67 @@ VMotion/Recreate role selections and mixed Hot/Cold modes are rejected by
 structural schema/CEL validation. `status.failureDomainMappings` is the
 preflight-resolved mapping consumed by VMotion; the path does not recalculate
 it or infer a mapping from failure-domain counts or names.
+
+## Runtime selection and frozen plan
+
+Any explicit VMotion role selection enters the VMotion path before legacy
+template/probe and MachineSet/CPMS processing. Invalid partial or mixed engine
+selections are blocked and never fall through to replacement. The executable
+resource remains only `openshift-vcf-migration/cluster`.
+
+The plan includes every Kubernetes Node; there is no selector. Only a cluster
+with exactly three dedicated control-plane Nodes and at least one worker is
+eligible. Dual-role and unclassified Nodes block the entire plan. Non-Node VMs,
+including load balancers, are outside operator scope.
+
+Each Node's `spec.providerID` must be a canonical `vsphere://<BIOS UUID>` and
+must resolve case-insensitively to exactly one VM `config.uuid` in a container
+view of the single source datacenter. Missing, malformed, zero, or ambiguous
+identities block the entire plan. A single source failure domain receives every
+Node through the same ownership check used for multi-FD clusters: resolve every
+source FD's `topology.computeCluster` path in the configured source
+vCenter/datacenter and bind its managed-object reference to the FD name. Reject
+duplicate references. Match each VM's `resourcePool.owner` to exactly one
+resolved FD by vCenter, reference type and ID, and datacenter scope; do not use
+resource-pool path/name as a tiebreaker or require a particular compute-resource
+type. If the Node has `topology.kubernetes.io/zone`, it must equal the matched
+FD's `Zone`; missing labels are allowed. Missing or ambiguous evidence blocks
+the whole plan.
+This owner-reference workflow is agreed in principle but has not been
+runtime-tested against the intended environment.
+
+Machine ownership is checked per planned Node through `Machine.status.nodeRef`
+UID, Machine `spec.providerID`, and a Node's `machine.openshift.io/machine`
+annotation when it resolves to a live Machine. Unrelated dangling Machines do
+not establish ownership. Any Machine in Provisioning, Provisioned, or Deleting
+phase, or with a deletion timestamp, blocks admission separately.
+
+The plan consumes the effective mapping in `status.failureDomainMappings` and
+freezes its execution identity, source/destination, mode, Node/VM identities,
+original cordon state, selected source FD and owner reference in the sanitized
+plan fingerprint, selected target failure domain, resource pool, datastore,
+and one destination network for the supported one-NIC VM. Plans block if either
+the VM or destination specification is ambiguous about that one-NIC mapping.
+Host is deliberately not pinned: the relocation request leaves
+Host unset for destination-cluster placement, then the workflow records the
+observed destination host in `status.nodeMigration.*.nodes[].targetHost` after
+the move. Reconciles reuse the frozen plan and block on identity, mapping, or
+placement drift. PR 2 stops after this read-only plan; it issues no VM actions.
+
+### Shared action/backend contract
+
+`internal/vsphere/vmotion_contract.go` is the shared contract for PRs 3 and 4.
+Inventory, feasibility checks, VM inspection, and task observation are
+read-only calls. `ShutdownGuest`, relocation, and power-on are mutating calls
+and may only follow an acknowledged durable action claim. An uncertain submit
+returns `Unknown`; that state is observed or escalated, never resubmitted. Task
+IDs always travel with their owning vCenter, `ShutdownGuest` has no task
+reference, and shutdown, relocation, and power-on outcomes remain independent.
+After a claim, observing its task/VM and persisting that result remains allowed
+across `Paused` or generation changes when the CR UID, execution ID, and action
+ID still match; this observation permission never allows a new claim or
+mutation. Result merging must not let stale writers replace a terminal or newer
+action.
 
 ## Examples
 
@@ -167,10 +227,12 @@ objects, full task results, or an event journal.
 
 Each existing per-node entry adds `nodeUID`, `providerID`, `vmBIOSUUID`,
 `originalSchedulingState` (`Schedulable` or `Unschedulable`), and frozen target
-host/resource-pool/datastore/network fields. An omitted scheduling state means
-the original state was not recorded. Existing source/target inventory paths,
-failure-domain, mode and timestamps remain available. `vmBIOSUUID` is the VM
-BIOS UUID and does **not** mean vSphere `config.instanceUuid`.
+failure-domain/resource-pool/datastore/network fields. `targetHost` remains
+empty until the workflow records the observed destination host after relocation;
+it is not a pinned placement. An omitted scheduling state means the original
+state was not recorded. Existing source/target inventory paths, failure-domain,
+mode and timestamps remain available. `vmBIOSUUID` is the VM BIOS UUID and does
+**not** mean vSphere `config.instanceUuid`.
 
 ### Action and outcomes
 
@@ -192,7 +254,7 @@ runtime proof or authorization.
 imply that only Cold mode drains. `Succeeded` means required action, identity,
 placement, and recovery verification completed; a stale Node Ready condition
 alone is insufficient. These semantics are API documentation, not implemented
-controller guarantees.
+controller guarantees until the corresponding runtime stage is merged.
 
 ## Validation and runtime boundary
 
@@ -204,9 +266,8 @@ bind task results to current generation, require a retained recovery request to
 match whichever action later becomes active, or claim live ownership/health was
 checked.
 
-Runtime work still needs frozen-plan execution, live action ownership and
-authorization, conflict-safe status copying, safe pause observation, action
-claim/replay prevention, recovery evidence and acknowledgement consumption,
-cleanup enforcement, dispatch isolation from legacy replacement, and the
-version/security/operational qualification described in
+Runtime work still needs durable action claims, live action ownership and
+authorization, conflict-safe action-result status merging, safe pause
+observation, recovery evidence and acknowledgement consumption, cleanup
+enforcement, and the version/security/operational qualification described in
 [`upi-cross-vcenter-vmotion-design.md`](../plans/upi-cross-vcenter-vmotion-design.md).

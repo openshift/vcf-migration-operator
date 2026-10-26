@@ -20,12 +20,19 @@ import (
 
 // VMotionVM is a read-only vSphere VM identity and observed placement.
 type VMotionVM struct {
-	BIOSUUID            string
-	InventoryPath       string
-	Host                string
-	PowerState          string
-	ResourcePoolRef     VMotionManagedObjectReference
-	ResourcePoolOwner   VMotionManagedObjectReference
+	// BIOSUUID is VirtualMachine.config.uuid, not config.instanceUuid.
+	BIOSUUID string
+	// InventoryPath is the VM's absolute path within the source datacenter.
+	InventoryPath string
+	// Host is the observed ESXi host path when returned by an inspection call.
+	Host string
+	// PowerState is the observed vSphere power state when returned by an inspection call.
+	PowerState string
+	// ResourcePoolRef is the VM's resourcePool managed-object reference.
+	ResourcePoolRef VMotionManagedObjectReference
+	// ResourcePoolOwner is the resource pool's owning compute-resource reference.
+	ResourcePoolOwner VMotionManagedObjectReference
+	// NetworkAdapterCount is the number of VirtualEthernetCard devices.
 	NetworkAdapterCount int
 }
 
