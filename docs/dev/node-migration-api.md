@@ -80,6 +80,8 @@ resource-pool path/name as a tiebreaker or require a particular compute-resource
 type. If the Node has `topology.kubernetes.io/zone`, it must equal the matched
 FD's `Zone`; missing labels are allowed. Missing or ambiguous evidence blocks
 the whole plan.
+The source inventory connection verifies TLS against the operator's system
+trust roots; an untrusted certificate blocks plan creation.
 This owner-reference workflow is agreed in principle but has not been
 runtime-tested against the intended environment.
 

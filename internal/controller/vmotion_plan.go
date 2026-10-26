@@ -473,7 +473,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) listVMotionVMInventory(ctx co
 		return vsphere.VMotionInventory{}, fmt.Errorf("getting credentials for source vCenter %s: %w", sourceVC.Server, err)
 	}
 	session, err := vsphere.NewSession(ctx, vsphere.Params{
-		Server: sourceVC.Server, Datacenter: sourceVC.Datacenters[0], Username: username, Password: password, Insecure: true,
+		Server: sourceVC.Server, Datacenter: sourceVC.Datacenters[0], Username: username, Password: password,
 	})
 	if err != nil {
 		return vsphere.VMotionInventory{}, fmt.Errorf("connecting to source vCenter %s/%s: %w", sourceVC.Server, sourceVC.Datacenters[0], err)
