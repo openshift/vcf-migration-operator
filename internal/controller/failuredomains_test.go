@@ -748,7 +748,7 @@ func TestWorkerMachineSetNameReservesSuffixSpace(t *testing.T) {
 
 func TestSeedFailureDomainMappings(t *testing.T) {
 	infraFDs := []configv1.VSpherePlatformFailureDomainSpec{
-		{Name: "source-fd-1", Server: "source.example.com"},
+		{Name: "source-fd-1", Server: cleanupTestSource},
 		{Name: "target-fd-1", Server: "target.example.com"},
 	}
 	newMigration := func(mappings []migrationv1alpha1.FailureDomainMapping) *migrationv1alpha1.VmwareCloudFoundationMigration {
@@ -781,8 +781,8 @@ func TestSeedFailureDomainMappings(t *testing.T) {
 		{
 			name: "ambiguous without mappings fails closed",
 			infraFDs: []configv1.VSpherePlatformFailureDomainSpec{
-				{Name: "source-fd-1", Server: "source.example.com"},
-				{Name: "source-fd-2", Server: "source.example.com"},
+				{Name: "source-fd-1", Server: cleanupTestSource},
+				{Name: "source-fd-2", Server: cleanupTestSource},
 				{Name: "target-fd-1", Server: "target.example.com"},
 			},
 			wantErr: "provide mappings",
@@ -815,14 +815,14 @@ func TestSeedFailureDomainMappings(t *testing.T) {
 func TestSourceVCenterServerReorderedInfrastructure(t *testing.T) {
 	infraFDs := []configv1.VSpherePlatformFailureDomainSpec{
 		{Name: "target-fd-1", Server: "target.example.com"},
-		{Name: "source-fd-1", Server: "source.example.com"},
+		{Name: "source-fd-1", Server: cleanupTestSource},
 	}
 	got, err := sourceVCenterServer(infraFDs, mappingList([2]string{"source-fd-1", "target-fd-1"}))
 	if err != nil {
 		t.Fatalf("sourceVCenterServer: %v", err)
 	}
-	if got != "source.example.com" {
-		t.Fatalf("sourceVCenterServer = %q, want %q", got, "source.example.com")
+	if got != cleanupTestSource {
+		t.Fatalf("sourceVCenterServer = %q, want %q", got, cleanupTestSource)
 	}
 
 	if _, err := sourceVCenterServer(infraFDs, nil); err == nil {
