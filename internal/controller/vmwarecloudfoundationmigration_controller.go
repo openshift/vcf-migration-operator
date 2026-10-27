@@ -299,10 +299,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 		return ctrl.Result{}, nil
 	}
 
-	if hasVMotionSelection(migration) {
-		return r.reconcileVMotionPlan(ctx, migration, baseStatus)
-	}
-
 	// If resuming from Paused, clear the Paused condition on Ready and set it to Progressing.
 	cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
 	if cond != nil && cond.Reason == migrationv1alpha1.ReasonPaused {
@@ -315,6 +311,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	if hasVMotionSelection(migration) {
+		return r.reconcileVMotionPlan(ctx, migration, baseStatus)
 	}
 
 	// Set start time on first reconcile in Running state.

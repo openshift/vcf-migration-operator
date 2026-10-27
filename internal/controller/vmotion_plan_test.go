@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	configv1 "github.com/openshift/api/config/v1"
 	machinev1beta1 "github.com/openshift/api/machine/v1beta1"
@@ -697,6 +698,58 @@ func TestVMotionInventoryRejectsUntrustedSourceCertificate(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "certificate signed by unknown authority") {
 		t.Fatalf("listVMotionVMInventory error = %v, want untrusted TLS certificate rejection", err)
+	}
+}
+
+func TestListVMotionVMInventoryUsesBoundedContext(t *testing.T) {
+	called := false
+	r := &VmwareCloudFoundationMigrationReconciler{
+		vmotionInventoryFunc: func(ctx context.Context, _ *configv1.VSpherePlatformVCenterSpec, _ []configv1.VSpherePlatformFailureDomainSpec, _ []string) (vsphere.VMotionInventory, error) {
+			called = true
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("inventory context has no deadline")
+			}
+			if remaining := time.Until(deadline); remaining <= 0 || remaining > preflightVSphereTimeout {
+				t.Fatalf("inventory deadline is %s from now, want a positive duration no longer than %s", remaining, preflightVSphereTimeout)
+			}
+			return vsphere.VMotionInventory{}, nil
+		},
+	}
+
+	_, err := r.listVMotionVMInventory(
+		context.Background(),
+		&configv1.VSpherePlatformVCenterSpec{Server: "source.example.com", Datacenters: []string{vmotionPlanTestSourceDatacenter}},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("listVMotionVMInventory: %v", err)
+	}
+	if !called {
+		t.Fatal("inventory function was not called")
+	}
+}
+
+func TestVMotionResumeClearsPausedReadyCondition(t *testing.T) {
+	migration := newVMotionPlanMigration()
+	apimeta.SetStatusCondition(&migration.Status.Conditions, metav1.Condition{
+		Type: migrationv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
+		Reason: migrationv1alpha1.ReasonPaused, Message: "paused", ObservedGeneration: migration.Generation,
+	})
+	r, c := reconcileErrReconciler(t, migration)
+
+	if _, err := r.reconcileWorkflow(context.Background(), migration, *migration.Status.DeepCopy()); err != nil {
+		t.Fatalf("reconcileWorkflow: %v", err)
+	}
+
+	got := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(migration), got); err != nil {
+		t.Fatalf("getting migration: %v", err)
+	}
+	ready := apimeta.FindStatusCondition(got.Status.Conditions, migrationv1alpha1.ConditionReady)
+	if ready == nil || ready.Reason != migrationv1alpha1.ReasonProgressing || ready.Message != "Migration is running" {
+		t.Fatalf("Ready = %+v, want Progressing after VMotion resume", ready)
 	}
 }
 

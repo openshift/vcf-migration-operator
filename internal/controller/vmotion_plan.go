@@ -459,6 +459,9 @@ func validateVMotionSourceFailureDomainReferences(failureDomains []configv1.VSph
 }
 
 func (r *VmwareCloudFoundationMigrationReconciler) listVMotionVMInventory(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, biosUUIDs []string) (vsphere.VMotionInventory, error) {
+	vsphereCtx, cancel := context.WithTimeout(ctx, preflightVSphereTimeout)
+	defer cancel()
+
 	sourceFailureDomains := make([]vsphere.VMotionSourceFailureDomain, 0, len(sourceFDs))
 	for i := range sourceFDs {
 		sourceFailureDomains = append(sourceFailureDomains, vsphere.VMotionSourceFailureDomain{
@@ -466,20 +469,24 @@ func (r *VmwareCloudFoundationMigrationReconciler) listVMotionVMInventory(ctx co
 		})
 	}
 	if r.vmotionInventoryFunc != nil {
-		return r.vmotionInventoryFunc(ctx, sourceVC, sourceFDs, biosUUIDs)
+		return r.vmotionInventoryFunc(vsphereCtx, sourceVC, sourceFDs, biosUUIDs)
 	}
-	username, password, err := openshift.NewSecretManager(r.KubeClient).GetCredentials(ctx, sourceVC.Server)
+	username, password, err := openshift.NewSecretManager(r.KubeClient).GetCredentials(vsphereCtx, sourceVC.Server)
 	if err != nil {
 		return vsphere.VMotionInventory{}, fmt.Errorf("getting credentials for source vCenter %s: %w", sourceVC.Server, err)
 	}
-	session, err := vsphere.NewSession(ctx, vsphere.Params{
+	session, err := vsphere.NewSession(vsphereCtx, vsphere.Params{
 		Server: sourceVC.Server, Datacenter: sourceVC.Datacenters[0], Username: username, Password: password,
 	})
 	if err != nil {
 		return vsphere.VMotionInventory{}, fmt.Errorf("connecting to source vCenter %s/%s: %w", sourceVC.Server, sourceVC.Datacenters[0], err)
 	}
-	defer session.Close(ctx)
-	return vsphere.ListVMotionVMInventory(ctx, session, sourceVC.Server, sourceFailureDomains, biosUUIDs)
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(vsphereCtx), 30*time.Second)
+		defer closeCancel()
+		session.Close(closeCtx)
+	}()
+	return vsphere.ListVMotionVMInventory(vsphereCtx, session, sourceVC.Server, sourceFailureDomains, biosUUIDs)
 }
 
 func buildVMotionPlan(migration *migrationv1alpha1.VmwareCloudFoundationMigration, sourceVC *configv1.VSpherePlatformVCenterSpec, destinationServer string, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, mappings []migrationv1alpha1.FailureDomainMapping, destinationFDs []configv1.VSpherePlatformFailureDomainSpec, identities []vmotionNodeIdentity, inventory vsphere.VMotionInventory) (*migrationv1alpha1.NodeMigrationStatus, error) {
