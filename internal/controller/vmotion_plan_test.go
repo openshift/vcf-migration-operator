@@ -155,10 +155,10 @@ func TestParseVMotionProviderID(t *testing.T) {
 }
 
 func TestSameVMotionVCenter(t *testing.T) {
-	if !sameVMotionVCenter("https://SOURCE.example.com/sdk", "source.example.com") {
+	if !sameVMotionVCenter("https://SOURCE.example.com/sdk", cleanupTestSource) {
 		t.Fatal("case and URL variants of the same vCenter must compare equal")
 	}
-	if sameVMotionVCenter("source.example.com", "target.example.com") {
+	if sameVMotionVCenter(cleanupTestSource, "target.example.com") {
 		t.Fatal("different vCenters must compare unequal")
 	}
 }
@@ -201,8 +201,8 @@ func TestSelectVMotionSourceFailureDomainByOwner(t *testing.T) {
 		{Name: "source-a", Zone: "zone-a"},
 		{Name: "source-b", Zone: "zone-b"},
 	}
-	refA := vsphere.VMotionManagedObjectReference{VCenter: "source.example.com", Datacenter: "SourceDC", Type: "ComputeResource", Value: "domain-11"}
-	refB := vsphere.VMotionManagedObjectReference{VCenter: "source.example.com", Datacenter: "SourceDC", Type: "ClusterComputeResource", Value: "domain-22"}
+	refA := vsphere.VMotionManagedObjectReference{VCenter: cleanupTestSource, Datacenter: "SourceDC", Type: "ComputeResource", Value: "domain-11"}
+	refB := vsphere.VMotionManagedObjectReference{VCenter: cleanupTestSource, Datacenter: "SourceDC", Type: "ClusterComputeResource", Value: "domain-22"}
 	refs := map[string]vsphere.VMotionManagedObjectReference{"source-a": refA, "source-b": refB}
 	tests := []struct {
 		name    string
@@ -232,7 +232,7 @@ func TestSelectVMotionSourceFailureDomainByOwner(t *testing.T) {
 			if node == nil {
 				node = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
 			}
-			got, err := selectVMotionSourceFailureDomainByOwner(node, tt.owner, "source.example.com", vmotionPlanTestSourceDatacenter, tt.fds, tt.refs)
+			got, err := selectVMotionSourceFailureDomainByOwner(node, tt.owner, cleanupTestSource, vmotionPlanTestSourceDatacenter, tt.fds, tt.refs)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("selectVMotionSourceFailureDomainByOwner error = %v, want substring %q", err, tt.wantErr)
@@ -296,7 +296,7 @@ type vmotionPlanHarness struct {
 
 func newVMotionPlanHarness(t *testing.T) *vmotionPlanHarness {
 	t.Helper()
-	const sourceServer = "source.example.com"
+	const sourceServer = cleanupTestSource
 	const sourceCluster = "/SourceDC/host/SourceCluster"
 	providerIDs := []string{
 		"vsphere://11111111-1111-4111-8111-111111111111",
@@ -488,7 +488,7 @@ func assertVMotionFrozenPlan(t *testing.T, h *vmotionPlanHarness) {
 	if status.Type != migrationv1alpha1.NodeMigrationTypeVMotion || status.MigrationUID != h.migration.UID || len(status.PlanFingerprint) != 64 {
 		t.Fatalf("nodeMigration identity = %+v, want VMotion, matching UID, and SHA-256 fingerprint", status)
 	}
-	if status.FrozenPlan.SourceVCenter != "source.example.com" || status.FrozenPlan.SourceDatacenter != vmotionPlanTestSourceDatacenter ||
+	if status.FrozenPlan.SourceVCenter != cleanupTestSource || status.FrozenPlan.SourceDatacenter != vmotionPlanTestSourceDatacenter ||
 		status.FrozenPlan.DestinationVCenter != "target.example.com" || status.FrozenPlan.Mode != migrationv1alpha1.VMotionModeHot {
 		t.Fatalf("frozen plan = %+v, want source/destination/mode identities", status.FrozenPlan)
 	}
@@ -630,11 +630,11 @@ func TestVMotionSourceVCenterUsesFrozenPlanIdentity(t *testing.T) {
 	migration := newVMotionPlanMigration()
 	migration.Status.NodeMigration = &migrationv1alpha1.NodeMigrationStatus{
 		FrozenPlan: &migrationv1alpha1.NodeMigrationFrozenPlan{
-			SourceVCenter: "source.example.com", SourceDatacenter: vmotionPlanTestSourceDatacenter,
+			SourceVCenter: cleanupTestSource, SourceDatacenter: vmotionPlanTestSourceDatacenter,
 			DestinationVCenter: "target.example.com", Mode: migrationv1alpha1.VMotionModeHot,
 		},
 	}
-	infrastructure := newInfrastructureForReadyTest([]string{"source.example.com", "target.example.com"})
+	infrastructure := newInfrastructureForReadyTest([]string{cleanupTestSource, "target.example.com"})
 	infrastructure.Spec.PlatformSpec.VSphere.VCenters[0].Datacenters = []string{vmotionPlanTestSourceDatacenter}
 	infrastructure.Spec.PlatformSpec.VSphere.VCenters[1].Datacenters = []string{"TargetDC"}
 
@@ -642,7 +642,7 @@ func TestVMotionSourceVCenterUsesFrozenPlanIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("vmotionSourceVCenter: %v", err)
 	}
-	if got.Server != "source.example.com" || len(got.Datacenters) != 1 || got.Datacenters[0] != vmotionPlanTestSourceDatacenter {
+	if got.Server != cleanupTestSource || len(got.Datacenters) != 1 || got.Datacenters[0] != vmotionPlanTestSourceDatacenter {
 		t.Fatalf("source vCenter = %+v, want frozen source identity", got)
 	}
 	emptyServerInfrastructure := newInfrastructureForReadyTest([]string{""})
@@ -719,7 +719,7 @@ func TestListVMotionVMInventoryUsesBoundedContext(t *testing.T) {
 
 	_, err := r.listVMotionVMInventory(
 		context.Background(),
-		&configv1.VSpherePlatformVCenterSpec{Server: "source.example.com", Datacenters: []string{vmotionPlanTestSourceDatacenter}},
+		&configv1.VSpherePlatformVCenterSpec{Server: cleanupTestSource, Datacenters: []string{vmotionPlanTestSourceDatacenter}},
 		nil,
 		nil,
 	)
@@ -805,7 +805,7 @@ func TestVMotionMappingResolutionFailsClosed(t *testing.T) {
 
 func TestValidateVMotionSourceFailureDomainReferences(t *testing.T) {
 	const (
-		vcenter    = "source.example.com"
+		vcenter    = cleanupTestSource
 		datacenter = "SourceDC"
 	)
 	fds := []configv1.VSpherePlatformFailureDomainSpec{{Name: "source-a"}, {Name: "source-b"}}
@@ -842,7 +842,7 @@ func TestBuildVMotionPlanRejectsMissingOrAmbiguousVM(t *testing.T) {
 	const biosUUID = "11111111-1111-4111-8111-111111111111"
 	migration := newVMotionPlanMigration()
 	migration.UID = types.UID("migration-uid")
-	sourceVC := &configv1.VSpherePlatformVCenterSpec{Server: "source.example.com", Datacenters: []string{vmotionPlanTestSourceDatacenter}}
+	sourceVC := &configv1.VSpherePlatformVCenterSpec{Server: cleanupTestSource, Datacenters: []string{vmotionPlanTestSourceDatacenter}}
 	sourceFD := configv1.VSpherePlatformFailureDomainSpec{
 		Name: "source-fd", Server: sourceVC.Server, Zone: "source-zone",
 		Topology: configv1.VSpherePlatformTopology{Datacenter: vmotionPlanTestSourceDatacenter, ComputeCluster: "/SourceDC/host/SourceCluster"},
