@@ -85,6 +85,7 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	// VMotionRecoveryCheck must verify claimant quiescence, outcome/inactivity, VM/Node identity,
 	// location/power, applicable health and live plan/inventory without mutations.
 	// It must honor its bounded context, including after internal waits.
+	// Uncertain evidence is a nonterminal observation; errors mean read failures.
 	// Nil blocks recovery until the qualified orchestration supplies these checks.
 	VMotionRecoveryCheck func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration) (migrationv1alpha1.NodeMigrationObservationState, error)
 

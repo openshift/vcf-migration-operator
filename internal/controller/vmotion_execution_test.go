@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,9 +12,11 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -456,9 +460,10 @@ func TestVMotionRecoveryIsActionBoundAndCannotBypassPause(t *testing.T) {
 		verified++
 		return migrationv1alpha1.NodeMigrationObservationFailed, nil
 	}
-	if err := r.recheckVMotionRecovery(context.Background(), m, verify); err == nil {
-		t.Fatal("accepted stale request")
+	if err := r.recheckVMotionRecovery(context.Background(), m, verify); err != nil {
+		t.Fatal(err)
 	}
+	assertVMotionRecoveryBlocked(t, r, m)
 	if verified != 0 {
 		t.Fatal("ran verifier for wrong action")
 	}
@@ -469,15 +474,20 @@ func TestVMotionRecoveryIsActionBoundAndCannotBypassPause(t *testing.T) {
 	if err := r.Update(context.Background(), m); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.recheckVMotionRecovery(context.Background(), m, nil); err == nil {
-		t.Fatal("cleared intervention without evidence verifier")
+	if err := r.recheckVMotionRecovery(context.Background(), m, nil); err != nil {
+		t.Fatal(err)
 	}
+	m = assertVMotionRecoveryBlocked(t, r, m)
 	if err := r.recheckVMotionRecovery(context.Background(), m, verify); err != nil {
 		t.Fatal(err)
 	}
 	m = readExecution(t, r, m)
 	if m.Status.NodeMigration.Intervention != nil || m.Status.NodeMigration.RecoveryAcknowledgement == nil {
 		t.Fatal("verified recovery was not consumed")
+	}
+	condition := apimeta.FindStatusCondition(m.Status.Conditions, "VMotionRecovery")
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "RecoveryVerified" {
+		t.Fatalf("verified recovery did not replace blocked condition: %+v", condition)
 	}
 	if err := r.recheckVMotionRecovery(context.Background(), m, verify); err != nil {
 		t.Fatal(err)
@@ -502,9 +512,10 @@ func TestVMotionRecoveryIsActionBoundAndCannotBypassPause(t *testing.T) {
 	if m.Status.NodeMigration.ActiveAction.ActionID == oldID {
 		t.Fatal("authorized retry reused action ID")
 	}
-	if err := r.recheckVMotionRecovery(context.Background(), m, verify); err == nil {
-		t.Fatal("old request authorized new action")
+	if err := r.recheckVMotionRecovery(context.Background(), m, verify); err != nil {
+		t.Fatal(err)
 	}
+	assertVMotionRecoveryBlocked(t, r, m)
 }
 
 func TestVMotionReconcileObservesDuringPauseAndDeletion(t *testing.T) {
@@ -694,9 +705,13 @@ func TestVMotionRecoveryRejectsUncertaintyAndChangedEvidence(t *testing.T) {
 				}
 				return tt.state, tt.err
 			})
-			if err == nil {
-				t.Fatal("recovery accepted incomplete or stale evidence")
+			if tt.err != nil && err == nil {
+				t.Fatal("recovery verification read failure was not returned")
 			}
+			if tt.err == nil && err != nil {
+				t.Fatal(err)
+			}
+			assertVMotionRecoveryBlocked(t, r, m)
 			got := readExecution(t, r, m).Status.NodeMigration
 			if got.Intervention == nil || got.RecoveryAcknowledgement != nil {
 				t.Fatal("recovery cleared uncertainty or consumed invalid evidence")
@@ -853,9 +868,10 @@ func TestVMotionRecoveryCannotOutrunOriginalClaimant(t *testing.T) {
 		verified = true
 		return migrationv1alpha1.NodeMigrationObservationFailed, nil
 	})
-	if err == nil || verified {
+	if err != nil || verified {
 		t.Fatal("recovery accepted external inactivity while the original claimant could still submit")
 	}
+	assertVMotionRecoveryBlocked(t, r, m)
 	if err := r.submitVMotionAction(context.Background(), readExecution(t, r, m), executionTestNode, migrationv1alpha1.NodeMigrationActionRelocateVM, b); err != nil {
 		t.Fatal(err)
 	}
@@ -1000,9 +1016,10 @@ func TestVMotionExpiredClaimStillNeedsAuthoritativeRecovery(t *testing.T) {
 	if err := r.Update(context.Background(), m); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.recheckVMotionRecovery(context.Background(), m, nil); err == nil {
-		t.Fatal("deadline expiry alone authorized recovery")
+	if err := r.recheckVMotionRecovery(context.Background(), m, nil); err != nil {
+		t.Fatal(err)
 	}
+	m = assertVMotionRecoveryBlocked(t, r, m)
 	if err := r.recheckVMotionRecovery(context.Background(), m, func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration) (migrationv1alpha1.NodeMigrationObservationState, error) {
 		return migrationv1alpha1.NodeMigrationObservationFailed, nil
 	}); err != nil {
@@ -1092,5 +1109,196 @@ func TestVMotionClaimRejectsMissingFrozenDatacenter(t *testing.T) {
 	}
 	if readExecution(t, r, m).Status.NodeMigration.ActiveAction != nil {
 		t.Fatal("persisted claim before rejecting missing datacenter")
+	}
+}
+
+func TestVMotionRecoveryRefusalPreservesObservationCadence(t *testing.T) {
+	for _, name := range []string{"missing verifier", "stale action", "no intervention", "claimant still authorized", "uncertain evidence"} {
+		t.Run(name, func(t *testing.T) {
+			r, m := newVMotionExecutionFixture(t, interceptor.Funcs{})
+			b := &executionBackend{submit: func(context.Context) (vsphere.VMotionSubmission, error) {
+				return vsphere.VMotionSubmission{State: vsphere.VMotionSubmissionUnknown}, nil
+			}}
+			m = claimExecution(t, r, m, migrationv1alpha1.NodeMigrationActionRelocateVM, b)
+			request := &migrationv1alpha1.NodeMigrationRecoveryRequest{RequestID: executionTestRecoveryID, ExecutionID: m.Status.NodeMigration.ExecutionID, ActionID: m.Status.NodeMigration.ActiveAction.ActionID}
+			switch name {
+			case "stale action":
+				request.ActionID = executionTestID
+			case "no intervention":
+				m.Status.NodeMigration.ActiveAction.ObservationState = migrationv1alpha1.NodeMigrationObservationSucceeded
+				m.Status.NodeMigration.Intervention = nil
+			case "claimant still authorized":
+				m.Status.NodeMigration.ActiveAction.SubmissionState = migrationv1alpha1.NodeMigrationSubmissionClaimed
+			case "uncertain evidence":
+				r.VMotionRecoveryCheck = func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration) (migrationv1alpha1.NodeMigrationObservationState, error) {
+					return migrationv1alpha1.NodeMigrationObservationUnknown, nil
+				}
+			}
+			if err := r.Status().Update(context.Background(), m); err != nil {
+				t.Fatal(err)
+			}
+			m.Spec.NodeMigration.RecoveryRequest = request
+			if err := r.Update(context.Background(), m); err != nil {
+				t.Fatal(err)
+			}
+			r.VMotionBackend = b
+			recorder := events.NewFakeRecorder(10)
+			r.Recorder = recorder
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(m)}
+			result, err := r.Reconcile(context.Background(), req)
+			if err != nil || result.RequeueAfter != 30*time.Second {
+				t.Fatalf("recovery refusal changed observation cadence: result=%+v, err=%v", result, err)
+			}
+			got := readExecution(t, r, m)
+			condition := apimeta.FindStatusCondition(got.Status.Conditions, "VMotionRecovery")
+			if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != vmotionRecoveryBlockedReason || condition.Message == "" || len(condition.Message) > 1024 || condition.ObservedGeneration != got.Generation {
+				t.Fatalf("recovery refusal has no bounded/current status: %+v", condition)
+			}
+			if got.Status.NodeMigration.RecoveryAcknowledgement != nil {
+				t.Fatal("ineligible request was consumed")
+			}
+			if name != "no intervention" && got.Status.NodeMigration.Intervention == nil {
+				t.Fatal("recovery refusal cleared intervention")
+			}
+			select {
+			case note := <-recorder.Events:
+				if !strings.Contains(note, vmotionRecoveryBlockedReason) {
+					t.Fatalf("unexpected recovery event: %q", note)
+				}
+			default:
+				t.Fatal("recovery refusal did not record a Warning event")
+			}
+			rv := got.ResourceVersion
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatal(err)
+			}
+			if readExecution(t, r, m).ResourceVersion != rv {
+				t.Fatal("identical recovery refusal generated another status write")
+			}
+			select {
+			case <-recorder.Events:
+				t.Fatal("identical recovery refusal emitted another event")
+			default:
+			}
+		})
+	}
+}
+
+func TestVMotionRecoveryConditionWriteFailureIsReturned(t *testing.T) {
+	wantErr := fmt.Errorf("persisting recovery condition failed")
+	r, m := newVMotionExecutionFixture(t, interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+		if migration, ok := obj.(*migrationv1alpha1.VmwareCloudFoundationMigration); ok && apimeta.FindStatusCondition(migration.Status.Conditions, "VMotionRecovery") != nil {
+			return wantErr
+		}
+		return c.SubResource(sub).Update(ctx, obj, opts...)
+	}})
+	b := &executionBackend{submit: func(context.Context) (vsphere.VMotionSubmission, error) {
+		return vsphere.VMotionSubmission{State: vsphere.VMotionSubmissionUnknown}, nil
+	}}
+	m = claimExecution(t, r, m, migrationv1alpha1.NodeMigrationActionRelocateVM, b)
+	m.Spec.NodeMigration.RecoveryRequest = &migrationv1alpha1.NodeMigrationRecoveryRequest{RequestID: executionTestRecoveryID, ExecutionID: m.Status.NodeMigration.ExecutionID, ActionID: m.Status.NodeMigration.ActiveAction.ActionID}
+	if err := r.Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.recheckVMotionRecovery(context.Background(), m, nil); !errors.Is(err, wantErr) {
+		t.Fatalf("recovery condition write failure was swallowed: %v", err)
+	}
+	if readExecution(t, r, m).Status.NodeMigration.RecoveryAcknowledgement != nil {
+		t.Fatal("failed condition persistence consumed request")
+	}
+}
+
+func assertVMotionRecoveryBlocked(t *testing.T, r *VmwareCloudFoundationMigrationReconciler, m *migrationv1alpha1.VmwareCloudFoundationMigration) *migrationv1alpha1.VmwareCloudFoundationMigration {
+	t.Helper()
+	got := readExecution(t, r, m)
+	condition := apimeta.FindStatusCondition(got.Status.Conditions, "VMotionRecovery")
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != vmotionRecoveryBlockedReason || condition.Message == "" {
+		t.Fatalf("recovery refusal was not reported: %+v", condition)
+	}
+	return got
+}
+
+func TestVMotionRecoveryConditionReadFailureIsReturned(t *testing.T) {
+	wantErr := fmt.Errorf("reading recovery status failed")
+	failReads := false
+	r, m := newVMotionExecutionFixture(t, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		if failReads {
+			return wantErr
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}})
+	b := &executionBackend{submit: func(context.Context) (vsphere.VMotionSubmission, error) {
+		return vsphere.VMotionSubmission{State: vsphere.VMotionSubmissionUnknown}, nil
+	}}
+	m = claimExecution(t, r, m, migrationv1alpha1.NodeMigrationActionRelocateVM, b)
+	m.Spec.NodeMigration.RecoveryRequest = &migrationv1alpha1.NodeMigrationRecoveryRequest{RequestID: executionTestRecoveryID, ExecutionID: m.Status.NodeMigration.ExecutionID, ActionID: m.Status.NodeMigration.ActiveAction.ActionID}
+	if err := r.Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	failReads = true
+	if err := r.recheckVMotionRecovery(context.Background(), m, nil); !errors.Is(err, wantErr) {
+		t.Fatalf("recovery status read failure was swallowed: %v", err)
+	}
+	failReads = false
+	if readExecution(t, r, m).Status.NodeMigration.RecoveryAcknowledgement != nil {
+		t.Fatal("read failure consumed request")
+	}
+}
+
+func TestVMotionBlockedRecoveryPreservesNewerActionStatus(t *testing.T) {
+	var once sync.Once
+	r, m := newVMotionExecutionFixture(t, interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+		if migration, ok := obj.(*migrationv1alpha1.VmwareCloudFoundationMigration); ok && apimeta.FindStatusCondition(migration.Status.Conditions, "VMotionRecovery") != nil {
+			once.Do(func() {
+				latest := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), latest); err != nil {
+					t.Fatal(err)
+				}
+				latest.Status.NodeMigration.ActiveAction.ActionID = executionTestRecoveryID
+				apimeta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{Type: "VMotionRecovery", Status: metav1.ConditionFalse, Reason: "NewerAction", Message: "newer action recovery evidence", ObservedGeneration: latest.Generation})
+				if err := c.SubResource(sub).Update(ctx, latest); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+		return c.SubResource(sub).Update(ctx, obj, opts...)
+	}})
+	b := &executionBackend{submit: func(context.Context) (vsphere.VMotionSubmission, error) {
+		return vsphere.VMotionSubmission{State: vsphere.VMotionSubmissionUnknown}, nil
+	}}
+	m = claimExecution(t, r, m, migrationv1alpha1.NodeMigrationActionRelocateVM, b)
+	m.Spec.NodeMigration.RecoveryRequest = &migrationv1alpha1.NodeMigrationRecoveryRequest{RequestID: executionTestRecoveryID, ExecutionID: m.Status.NodeMigration.ExecutionID, ActionID: m.Status.NodeMigration.ActiveAction.ActionID}
+	if err := r.Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.recheckVMotionRecovery(context.Background(), m, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := readExecution(t, r, m)
+	condition := apimeta.FindStatusCondition(got.Status.Conditions, "VMotionRecovery")
+	if got.Status.NodeMigration.ActiveAction.ActionID != executionTestRecoveryID || condition == nil || condition.Message != "newer action recovery evidence" {
+		t.Fatalf("stale refusal overwrote newer action/status: %+v", condition)
+	}
+}
+
+func TestVMotionHotRelocationDoesNotRequireShutdown(t *testing.T) {
+	r, m := newVMotionExecutionFixture(t, interceptor.Funcs{})
+	m.Status.NodeMigration.FrozenPlan.Mode = migrationv1alpha1.VMotionModeHot
+	m.Status.NodeMigration.Workers.Nodes[0].ShutdownOutcome = nil
+	if err := r.Status().Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	m.Spec.NodeMigration.Workers.VMotion.Mode = migrationv1alpha1.VMotionModeHot
+	m.Spec.NodeMigration.ControlPlane.VMotion.Mode = migrationv1alpha1.VMotionModeHot
+	if err := r.Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	b := &executionBackend{submit: func(context.Context) (vsphere.VMotionSubmission, error) { calls++; return acknowledgedRelocation() }}
+	if err := r.submitVMotionAction(context.Background(), m, executionTestNode, migrationv1alpha1.NodeMigrationActionRelocateVM, b); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatal("Hot relocation was blocked by the Cold shutdown guard")
 	}
 }
