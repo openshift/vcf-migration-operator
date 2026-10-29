@@ -84,6 +84,10 @@ func newVMotionExecutionFixture(t *testing.T, hooks interceptor.Funcs) (*VmwareC
 			ProviderID: "vsphere://00000000-0000-4000-8000-000000000001", State: migrationv1alpha1.NodeMigrationStatePreparing,
 			TargetFailureDomain: m.Spec.FailureDomains[0].Name, TargetResourcePool: "/TargetDC/host/cluster/Resources",
 			TargetDatastore: "/TargetDC/datastore/ds", TargetNetwork: executionTestNetwork,
+			ShutdownOutcome: &migrationv1alpha1.NodeMigrationOperationOutcome{
+				ActionID: "44444444-4444-4444-8444-444444444444", Kind: migrationv1alpha1.NodeMigrationActionShutdownGuest,
+				State: migrationv1alpha1.NodeMigrationOutcomeSucceeded, OwnerVCenter: cleanupTestSource,
+			},
 		}}},
 	}
 	m.Spec.NodeMigration.Workers.VMotion.Mode = migrationv1alpha1.VMotionModeCold
@@ -334,6 +338,10 @@ func TestVMotionObservationStaleWriterCannotReplaceTerminalOrNewAction(t *testin
 
 func TestVMotionShutdownDeadlineAndLateCompletion(t *testing.T) {
 	r, m := newVMotionExecutionFixture(t, interceptor.Funcs{})
+	m.Status.NodeMigration.Workers.Nodes[0].ShutdownOutcome = nil
+	if err := r.Status().Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
 	b := &executionBackend{submit: func(context.Context) (vsphere.VMotionSubmission, error) {
 		return vsphere.VMotionSubmission{State: vsphere.VMotionSubmissionAcknowledged}, nil
 	}}
@@ -1031,4 +1039,30 @@ func TestVMotionTaskLateSuccessRetainsDeadlineIntervention(t *testing.T) {
 			t.Fatal("late task success lost evidence or authorized progression")
 		}
 	})
+}
+
+func TestVMotionColdRelocationRequiresSuccessfulShutdown(t *testing.T) {
+	for _, state := range []migrationv1alpha1.NodeMigrationOutcomeState{"", migrationv1alpha1.NodeMigrationOutcomeFailed, migrationv1alpha1.NodeMigrationOutcomeUnknown, migrationv1alpha1.NodeMigrationOutcomeSucceeded} {
+		t.Run(string(state), func(t *testing.T) {
+			r, m := newVMotionExecutionFixture(t, interceptor.Funcs{})
+			n := &m.Status.NodeMigration.Workers.Nodes[0]
+			n.ShutdownOutcome = nil
+			if state != "" {
+				n.ShutdownOutcome = &migrationv1alpha1.NodeMigrationOperationOutcome{ActionID: executionTestRecoveryID, Kind: migrationv1alpha1.NodeMigrationActionShutdownGuest, State: state, OwnerVCenter: cleanupTestSource}
+			}
+			if err := r.Status().Update(context.Background(), m); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			b := &executionBackend{submit: func(context.Context) (vsphere.VMotionSubmission, error) { calls++; return acknowledgedRelocation() }}
+			err := r.submitVMotionAction(context.Background(), m, executionTestNode, migrationv1alpha1.NodeMigrationActionRelocateVM, b)
+			if state == migrationv1alpha1.NodeMigrationOutcomeSucceeded {
+				if err != nil || calls != 1 {
+					t.Fatalf("successful shutdown did not permit relocation: calls=%d, err=%v", calls, err)
+				}
+			} else if err == nil || calls != 0 || readExecution(t, r, m).Status.NodeMigration.ActiveAction != nil {
+				t.Fatalf("Cold relocation claimed without shutdown success: calls=%d, err=%v", calls, err)
+			}
+		})
+	}
 }

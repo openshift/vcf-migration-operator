@@ -26,6 +26,11 @@ namespace/name, the expected generation, Running, no deletion, no intervention,
 and the exact previous action snapshot. Every retry rereads these gates. This
 distinguishes an unrelated status conflict from a competing claim or pause.
 
+Cold relocation claims additionally require a recorded successful graceful
+shutdown; absent, failed or uncertain shutdown evidence cannot silently become
+a Hot move. This ordering guard supplements the later workflow's fresh power
+state and native feasibility checks rather than replacing them.
+
 Only a successful response to a newly created claim reaches a mutating backend.
 A lost acknowledgement stops submission even if Kubernetes stored the claim.
 A later reconcile never calls a mutation merely because it sees `Claimed` or
