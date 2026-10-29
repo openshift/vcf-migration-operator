@@ -44,6 +44,13 @@ submission call uses the claimed snapshot, so a later pause does not discard its
 result or change the intended operation. Pause policy A allows a prior winning
 claim to reach vCenter; pause is not cancellation.
 
+Each node persists `targetDatacenter` with its other frozen destination fields.
+Relocation and power-on read that value from status, not from a subsequently
+edited failure-domain spec. It participates in frozen-node stability checks and
+was already included in the plan fingerprint. The API field is optional for
+compatibility, but missing values block new claims rather than being silently
+backfilled from current spec.
+
 Acknowledged relocation/power-on submissions require a nonempty bounded task ID
 owned by the action's vCenter. Shutdown must have no task reference. Missing,
 wrong-owner, contradictory or uncertain submission evidence requires
