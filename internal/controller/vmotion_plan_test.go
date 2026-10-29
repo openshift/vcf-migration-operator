@@ -740,6 +740,90 @@ func TestVMotionReconcilePreservesPlanAfterSourceServerCaseChange(t *testing.T) 
 	}
 }
 
+func TestValidateVMotionVCenterScope(t *testing.T) {
+	tests := []struct {
+		name    string
+		servers []string
+		nilSpec bool
+		wantErr string
+	}{
+		{name: "no vSphere configuration", nilSpec: true, wantErr: "no vSphere configuration"},
+		{name: "source only", servers: []string{cleanupTestSource}},
+		{name: "source and destination", servers: []string{cleanupTestSource, "target.example.com"}},
+		{name: "no entries", wantErr: "found 0 source and 0 destination entries"},
+		{name: "missing source", servers: []string{"target.example.com"}, wantErr: "found 0 source and 1 destination entries"},
+		{name: "duplicate source", servers: []string{cleanupTestSource, "SOURCE.example.com"}, wantErr: "found 2 source and 0 destination entries"},
+		{name: "unexpected vCenter", servers: []string{cleanupTestSource, "target.example.com", "other.example.com"}, wantErr: `unexpected vCenter "other.example.com"`},
+		{name: "duplicate destination", servers: []string{cleanupTestSource, "target.example.com", "TARGET.example.com"}, wantErr: "found 1 source and 2 destination entries"},
+		{name: "equivalent source and destination", servers: []string{"https://SOURCE.example.com/sdk", "TARGET.example.com"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infrastructure := newInfrastructureForReadyTest(tt.servers)
+			if tt.nilSpec {
+				infrastructure.Spec.PlatformSpec.VSphere = nil
+			}
+			err := validateVMotionVCenterScope(infrastructure, cleanupTestSource, "target.example.com")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateVMotionVCenterScope: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateVMotionVCenterScope error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestVMotionSourceFailureDomains(t *testing.T) {
+	sourceFD := configv1.VSpherePlatformFailureDomainSpec{
+		Name: "source-a", Server: cleanupTestSource,
+		Topology: configv1.VSpherePlatformTopology{Datacenter: vmotionPlanTestSourceDatacenter},
+	}
+	secondFD := sourceFD
+	secondFD.Name, secondFD.Server = "source-b", "https://SOURCE.example.com/sdk"
+	destinationFD := configv1.VSpherePlatformFailureDomainSpec{Name: "target-fd", Server: "TARGET.example.com"}
+	wrongDatacenter := sourceFD
+	wrongDatacenter.Topology.Datacenter = "OtherDC"
+	unexpectedFD := configv1.VSpherePlatformFailureDomainSpec{Name: "unexpected-fd", Server: "other.example.com"}
+	tests := []struct {
+		name    string
+		fds     []configv1.VSpherePlatformFailureDomainSpec
+		want    []string
+		wantErr string
+	}{
+		{name: "no source match", fds: []configv1.VSpherePlatformFailureDomainSpec{destinationFD}, wantErr: "no source failure domains"},
+		{name: "one source", fds: []configv1.VSpherePlatformFailureDomainSpec{sourceFD}, want: []string{"source-a"}},
+		{name: "multiple sources", fds: []configv1.VSpherePlatformFailureDomainSpec{sourceFD, secondFD}, want: []string{"source-a", "source-b"}},
+		{name: "destination excluded", fds: []configv1.VSpherePlatformFailureDomainSpec{destinationFD, sourceFD}, want: []string{"source-a"}},
+		{name: "unexpected vCenter", fds: []configv1.VSpherePlatformFailureDomainSpec{sourceFD, unexpectedFD}, wantErr: `failure domain "unexpected-fd" references unexpected vCenter`},
+		{name: "datacenter mismatch", fds: []configv1.VSpherePlatformFailureDomainSpec{wrongDatacenter}, wantErr: `datacenter "OtherDC" differs from configured source datacenter`},
+		{name: "empty failure domains", wantErr: "no source failure domains"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infrastructure := newInfrastructureForReadyTest([]string{cleanupTestSource})
+			infrastructure.Spec.PlatformSpec.VSphere.FailureDomains = tt.fds
+			sourceVC := &configv1.VSpherePlatformVCenterSpec{Server: cleanupTestSource, Datacenters: []string{vmotionPlanTestSourceDatacenter}}
+			got, err := vmotionSourceFailureDomains(newVMotionPlanMigration(), infrastructure, sourceVC)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || got != nil {
+					t.Fatalf("vmotionSourceFailureDomains = %+v, %v, want no partial result and error containing %q", got, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || len(got) != len(tt.want) {
+				t.Fatalf("vmotionSourceFailureDomains = %+v, %v, want %v", got, err, tt.want)
+			}
+			for i, name := range tt.want {
+				if got[i].Name != name || got[i].Topology.Datacenter != vmotionPlanTestSourceDatacenter {
+					t.Fatalf("source FD %d = %+v, want %q in source datacenter", i, got[i], name)
+				}
+			}
+		})
+	}
+}
+
 func TestVMotionMachineEligibilityBlocksConflictingBindings(t *testing.T) {
 	nodeA := newVMotionPlanNode("worker-a", "worker", "vsphere://11111111-1111-4111-8111-111111111111", "node-uid-a", false)
 	nodeB := newVMotionPlanNode("worker-b", "worker", "vsphere://22222222-2222-4222-8222-222222222222", "node-uid-b", false)
