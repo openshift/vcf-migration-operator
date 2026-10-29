@@ -117,6 +117,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) submitVMotionAction(ctx conte
 		if kind == migrationv1alpha1.NodeMigrationActionPowerOnVM && (node.RelocationOutcome == nil || node.RelocationOutcome.State != migrationv1alpha1.NodeMigrationOutcomeSucceeded) {
 			return false, fmt.Errorf("claiming VMotion power-on: relocation success is not recorded")
 		}
+		if s.FrozenPlan.Mode == migrationv1alpha1.VMotionModeCold && kind == migrationv1alpha1.NodeMigrationActionRelocateVM &&
+			(node.ShutdownOutcome == nil || node.ShutdownOutcome.State != migrationv1alpha1.NodeMigrationOutcomeSucceeded) {
+			return false, fmt.Errorf("claiming VMotion Cold relocation: graceful shutdown success is not recorded")
+		}
 		owner := s.FrozenPlan.SourceVCenter
 		if kind == migrationv1alpha1.NodeMigrationActionPowerOnVM {
 			owner = s.FrozenPlan.DestinationVCenter
