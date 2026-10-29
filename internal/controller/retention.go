@@ -15,6 +15,8 @@ import (
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 )
 
+const allowDeletionAnnotationValue = "true"
+
 func (r *VmwareCloudFoundationMigrationReconciler) permissionReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
@@ -55,7 +57,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateRetentionFinalizer(ctx 
 			if err != nil {
 				return err
 			}
-			if complete || latest.Annotations[migrationv1alpha1.AnnotationAllowDeletion] == "true" {
+			if (complete && !hasUnresolvedVMotionAction(latest)) || latest.Annotations[migrationv1alpha1.AnnotationAllowDeletion] == allowDeletionAnnotationValue {
 				changed = controllerutil.RemoveFinalizer(latest, migrationv1alpha1.FinalizerName)
 			}
 		}
