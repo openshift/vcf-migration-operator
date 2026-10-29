@@ -95,11 +95,13 @@ PR 1 and PR #219 both change API types and generated CRD/bundle artifacts. Coord
 
 **Files:** `internal/controller/execution.go`, new `internal/controller/vmotion_execution.go` and focused tests, and `api/v1alpha1/` only if an agreed status gap is found.
 
-- [ ] Implement conflict-safe, identity-bound action claims and status merging using CR UID plus execution/plan/action IDs. A stale writer must not replace a newer action or terminal result.
-- [ ] Separate permission to submit a new mutation from permission to observe and persist an existing action result; keep pause/generation changes from losing an in-flight result without authorizing new actions.
-- [ ] Record shutdown, relocation, and power-on outcomes independently. Keep a claim without task reference uncertain; never resubmit it automatically. Scope every task reference to its owning vCenter.
-- [ ] Implement pause A, bounded deadlines, late-completion observation, restart/leader-takeover handling, action-bound recovery acknowledgement, and deletion handoff without creating an unbounded journal or separate workflow service.
-- [ ] Test claim/call/task-persistence crash windows, competing reconciles/resourceVersion conflicts, stale writers, pause before/after claim, restart with unknown submission, timeout plus late completion, stale recovery requests, and relocation success plus later power-on failure. Assert no blind duplicate submission and no recovery bypass of pause.
+- [x] Implement conflict-safe, identity-bound action claims and status merging using CR UID plus execution/plan/action IDs. A stale writer must not replace a newer action or terminal result.
+- [x] Separate permission to submit a new mutation from permission to observe and persist an existing action result; keep pause/generation changes from losing an in-flight result without authorizing new actions.
+- [x] Record shutdown, relocation, and power-on outcomes independently. Keep a claim without task reference uncertain; never resubmit it automatically. Scope every task reference to its owning vCenter.
+- [x] Implement pause A, bounded deadlines, late-completion observation, restart/leader-takeover handling, action-bound recovery acknowledgement, and deletion handoff without creating an unbounded journal or separate workflow service.
+- [x] Test claim/call/task-persistence crash windows, competing reconciles/resourceVersion conflicts, stale writers, pause before/after claim, restart with unknown submission, timeout plus late completion, stale recovery requests, and relocation success plus later power-on failure. Assert no blind duplicate submission and no recovery bypass of pause.
+
+Implementation details and boundaries: [`docs/dev/vmotion-execution.md`](../../dev/vmotion-execution.md), tracked under SPLAT-2703. The tested action component does not enable production submissions. Recovery requires the later read-only evidence verifier, including claimant quiescence; six-hour action deadlines retain a qualification TODO.
 
 **Merge gate:** Fake-backend failures and conflict tests prove at-most-one acknowledged submission attempt; observation/recovery never implies replay permission.
 

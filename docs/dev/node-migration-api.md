@@ -10,9 +10,12 @@ replay an operation.
 
 > **Bounded runtime foundation.** The controller implements explicit VMotion
 > dispatch, eligibility checks, and read-only frozen-plan creation. It does not
-> mutate VMs or run the node migration workflow. The full action state machine,
-> recovery enforcement, control-plane health gates, cleanup, and qualification
-> remain follow-up work.
+> run the node migration workflow. The durable action component is implemented
+> and tested with fake backends; production action submission remains disconnected.
+> Existing claims can be observed across pause, spec edits, and deletion. Recovery
+> requires an injected read-only evidence verifier; no production verifier is
+> configured. Control-plane health gates, cleanup, and qualification remain
+> follow-up work. See [durable execution](vmotion-execution.md).
 
 ## Selection and validation
 
@@ -268,8 +271,9 @@ Each per-node entry has separate `shutdownOutcome`, `relocationOutcome`, and
 `powerOnOutcome` fields. A later power-on result must not overwrite relocation
 success. Outcome/count/state fields do not independently authorize another
 action. `intervention`, `recoveryAcknowledgement`, and `cleanup` are bounded
-records for future runtime enforcement; their presence or values are not
-runtime proof or authorization.
+records; their presence or values are not runtime proof or authorization.
+The action component enforces identity-bound claims and recovery consumption;
+cleanup enforcement remains follow-up work.
 
 `Preparing` is a coarse pre-action/scheduling-preparation state and does not
 imply that only Cold mode drains. `Succeeded` means required action, identity,
@@ -287,8 +291,6 @@ bind task results to current generation, require a retained recovery request to
 match whichever action later becomes active, or claim live ownership/health was
 checked.
 
-Runtime work still needs durable action claims, live action ownership and
-authorization, conflict-safe action-result status merging, safe pause
-observation, recovery evidence and acknowledgement consumption, cleanup
-enforcement, and the version/security/operational qualification described in
+Runtime work still needs integration with fresh workflow admission and recovery
+evidence, cleanup enforcement, and the version/security/operational qualification described in
 [`upi-cross-vcenter-vmotion-design.md`](../plans/upi-cross-vcenter-vmotion-design.md).
