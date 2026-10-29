@@ -251,7 +251,10 @@ objects, full task results, or an event journal.
 
 Each existing per-node entry adds `nodeUID`, `providerID`, `vmBIOSUUID`,
 `originalSchedulingState` (`Schedulable` or `Unschedulable`), and frozen target
-failure-domain/resource-pool/datastore/network fields. `targetHost` remains
+failure-domain/datacenter/resource-pool/datastore/network fields. The optional
+`targetDatacenter` is populated when freezing each node and is required by the
+VMotion claim path. Older plans missing it are blocked; execution never fills
+it from the live spec. `targetHost` remains
 empty until the workflow records the observed destination host after relocation;
 it is not a pinned placement. An omitted scheduling state means the original
 state was not recorded. Existing source/target inventory paths, failure-domain,

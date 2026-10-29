@@ -82,7 +82,7 @@ func newVMotionExecutionFixture(t *testing.T, hooks interceptor.Funcs) (*VmwareC
 		Workers: &migrationv1alpha1.RoleMigrationStatus{Nodes: []migrationv1alpha1.NodeMigrationProgress{{
 			Name: executionTestNode, NodeUID: "node-uid", VMBIOSUUID: executionTestBIOSUUID,
 			ProviderID: "vsphere://00000000-0000-4000-8000-000000000001", State: migrationv1alpha1.NodeMigrationStatePreparing,
-			TargetFailureDomain: m.Spec.FailureDomains[0].Name, TargetResourcePool: "/TargetDC/host/cluster/Resources",
+			TargetFailureDomain: m.Spec.FailureDomains[0].Name, TargetDatacenter: executionTestTargetDC, TargetResourcePool: "/TargetDC/host/cluster/Resources",
 			TargetDatastore: "/TargetDC/datastore/ds", TargetNetwork: executionTestNetwork,
 			ShutdownOutcome: &migrationv1alpha1.NodeMigrationOperationOutcome{
 				ActionID: "44444444-4444-4444-8444-444444444444", Kind: migrationv1alpha1.NodeMigrationActionShutdownGuest,
@@ -1064,5 +1064,33 @@ func TestVMotionColdRelocationRequiresSuccessfulShutdown(t *testing.T) {
 				t.Fatalf("Cold relocation claimed without shutdown success: calls=%d, err=%v", calls, err)
 			}
 		})
+	}
+}
+
+func TestVMotionPlacementDoesNotAdoptLiveDatacenter(t *testing.T) {
+	_, m := newVMotionExecutionFixture(t, interceptor.Funcs{})
+	m.Spec.FailureDomains[0].Topology.Datacenter = "edited-datacenter"
+	n := &m.Status.NodeMigration.Workers.Nodes[0]
+	got, err := targetVMotionPlacement(m, n)
+	if err != nil || got.Datacenter != executionTestTargetDC {
+		t.Fatalf("targetVMotionPlacement = %+v, %v; must retain frozen datacenter %q", got, err, executionTestTargetDC)
+	}
+}
+
+func TestVMotionClaimRejectsMissingFrozenDatacenter(t *testing.T) {
+	r, m := newVMotionExecutionFixture(t, interceptor.Funcs{})
+	m.Status.NodeMigration.Workers.Nodes[0].TargetDatacenter = ""
+	if err := r.Status().Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	b := &executionBackend{submit: func(context.Context) (vsphere.VMotionSubmission, error) {
+		t.Fatal("used live spec to repair missing frozen datacenter")
+		return acknowledgedRelocation()
+	}}
+	if err := r.submitVMotionAction(context.Background(), m, executionTestNode, migrationv1alpha1.NodeMigrationActionRelocateVM, b); err == nil {
+		t.Fatal("accepted incomplete frozen placement")
+	}
+	if readExecution(t, r, m).Status.NodeMigration.ActiveAction != nil {
+		t.Fatal("persisted claim before rejecting missing datacenter")
 	}
 }
