@@ -231,6 +231,13 @@ clear intervention, prove inactivity, or authorize replay. Pause A permits
 observation of existing work but starts no new actions; after a Cold relocation,
 the VM may remain off until resume.
 
+Expected recovery refusals are reported by the bounded `VMotionRecovery=False`
+condition (`RecoveryBlocked`), preserving normal observation polling. A verified,
+consumed request records `VMotionRecovery=True` (`RecoveryVerified`). These
+conditions describe the recheck result, not mutation authorization. Transient
+read/write failures remain reconcile errors; repeated identical policy refusals
+do not continuously rewrite status or emit events.
+
 ## Status model
 
 `status.nodeMigration` retains `type`, human-readable `progress`, `controlPlane`,

@@ -107,6 +107,19 @@ outcome, not a new operation to perform. Nil, unavailable, conflicting or
 nonterminal evidence leaves intervention in place and does not consume a request.
 Any resourceVersion change during verification requires a fresh recheck.
 
+Expected refusals (a stale request, no matching intervention, a still-authorized
+claimant, a missing verifier, or uncertain/conflicting evidence) set the bounded
+`VMotionRecovery=False` condition with reason `RecoveryBlocked`. They return the
+normal observation requeue rather than a reconcile error. Identical refusals do
+not rewrite status or emit another event, and an older refusal cannot replace a
+newer action's status. Operational read/write failures still return errors for
+retry; verifier I/O failures also leave a sanitized blocked condition. Verifiers
+report uncertain evidence as a nonterminal observation, not an operational error.
+
+Successful verification records `VMotionRecovery=True` with reason
+`RecoveryVerified` atomically with acknowledgement consumption. Neither condition
+is permission to replay an action or bypass pause/admission gates.
+
 A `Claimed` action may still have a suspended original submitter. Recovery is
 therefore blocked until its persisted submission deadline has expired; missing
 deadlines fail closed. The mutation backend must check cancellation before
