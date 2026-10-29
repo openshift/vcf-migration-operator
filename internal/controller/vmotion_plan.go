@@ -147,7 +147,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileVMotionPlan(ctx cont
 	if err := validateFailureDomainTypes(migration.Spec.FailureDomains); err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
 	}
-	sourceVC, err := vmotionSourceVCenter(migration, infrastructure)
+	sourceVC, liveServer, err := vmotionSourceVCenter(migration, infrastructure)
 	if err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
 	}
@@ -173,7 +173,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileVMotionPlan(ctx cont
 		}
 		return r.recordEffectiveVMotionMapping(ctx, migration, baseStatus, sourceFDs)
 	}
-	return r.freezeVMotionPlan(ctx, migration, baseStatus, sourceVC, sourceFDs, nodes.Items)
+	return r.freezeVMotionPlan(ctx, migration, baseStatus, sourceVC, liveServer, sourceFDs, nodes.Items)
 }
 
 func validateVMotionSelection(selection *migrationv1alpha1.NodeMigrationSpec) error {
@@ -211,7 +211,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) recordEffectiveVMotionMapping
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-func (r *VmwareCloudFoundationMigrationReconciler) freezeVMotionPlan(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus, sourceVC *configv1.VSpherePlatformVCenterSpec, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, nodes []corev1.Node) (ctrl.Result, error) {
+func (r *VmwareCloudFoundationMigrationReconciler) freezeVMotionPlan(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus, sourceVC *configv1.VSpherePlatformVCenterSpec, liveServer string, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, nodes []corev1.Node) (ctrl.Result, error) {
 	destinationServer := migration.Spec.FailureDomains[0].Server
 	if err := validateVMotionMappings(migration.Status.FailureDomainMappings, sourceFDs, migration.Spec.FailureDomains); err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
@@ -234,7 +234,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) freezeVMotionPlan(ctx context
 	for i := range identities {
 		biosUUIDs = append(biosUUIDs, identities[i].biosUUID)
 	}
-	inventory, err := r.listVMotionVMInventory(ctx, sourceVC, sourceFDs, biosUUIDs)
+	inventory, err := r.listVMotionVMInventory(ctx, sourceVC, liveServer, sourceFDs, biosUUIDs)
 	if err != nil {
 		return r.retryVMotionPlan(ctx, migration, baseStatus, err)
 	}
@@ -311,10 +311,11 @@ func collectVMotionNodeIdentities(nodes []corev1.Node) ([]vmotionNodeIdentity, e
 	return identities, nil
 }
 
-func vmotionSourceVCenter(migration *migrationv1alpha1.VmwareCloudFoundationMigration, infrastructure *configv1.Infrastructure) (*configv1.VSpherePlatformVCenterSpec, error) {
+// vmotionSourceVCenter returns the frozen identity and the live server spelling for credential lookup and connections.
+func vmotionSourceVCenter(migration *migrationv1alpha1.VmwareCloudFoundationMigration, infrastructure *configv1.Infrastructure) (*configv1.VSpherePlatformVCenterSpec, string, error) {
 	vsphereSpec := infrastructure.Spec.PlatformSpec.VSphere
 	if vsphereSpec == nil || len(vsphereSpec.VCenters) == 0 {
-		return nil, fmt.Errorf("reading source Infrastructure: no vCenter configuration is present")
+		return nil, "", fmt.Errorf("reading source Infrastructure: no vCenter configuration is present")
 	}
 	server := ""
 	datacenter := ""
@@ -323,40 +324,45 @@ func vmotionSourceVCenter(migration *migrationv1alpha1.VmwareCloudFoundationMigr
 		datacenter = migration.Status.NodeMigration.FrozenPlan.SourceDatacenter
 	}
 	if migration.Status.SourceVCenter != "" {
-		if server != "" && migration.Status.SourceVCenter != server {
-			return nil, fmt.Errorf("resolving source vCenter for VMotion: persisted source identities disagree")
+		if server != "" && !sameVMotionVCenter(migration.Status.SourceVCenter, server) {
+			return nil, "", fmt.Errorf("resolving source vCenter for VMotion: persisted source identities disagree")
 		}
-		server = migration.Status.SourceVCenter
+		if server == "" {
+			server = migration.Status.SourceVCenter
+		}
 	}
 	if server == "" {
 		if len(vsphereSpec.VCenters) != 1 {
-			return nil, fmt.Errorf("resolving source vCenter for VMotion: expected one entry before source identity is frozen, found %d", len(vsphereSpec.VCenters))
+			return nil, "", fmt.Errorf("resolving source vCenter for VMotion: expected one entry before source identity is frozen, found %d", len(vsphereSpec.VCenters))
 		}
 		server = vsphereSpec.VCenters[0].Server
 	}
 	var selected *configv1.VSpherePlatformVCenterSpec
 	for i := range vsphereSpec.VCenters {
-		if vsphereSpec.VCenters[i].Server != server {
+		if !sameVMotionVCenter(vsphereSpec.VCenters[i].Server, server) {
 			continue
 		}
 		if selected != nil {
-			return nil, fmt.Errorf("resolving source vCenter %q for VMotion: multiple Infrastructure entries match", server)
+			return nil, "", fmt.Errorf("resolving source vCenter %q for VMotion: multiple Infrastructure entries match", server)
 		}
 		selected = &vsphereSpec.VCenters[i]
 	}
 	if selected == nil {
-		return nil, fmt.Errorf("resolving source vCenter %q for VMotion: no Infrastructure entry matches the frozen source", server)
+		return nil, "", fmt.Errorf("resolving source vCenter %q for VMotion: no Infrastructure entry matches the frozen source", server)
 	}
 	if selected.Server == "" {
-		return nil, fmt.Errorf("validating source vCenter: server must not be empty")
+		return nil, "", fmt.Errorf("validating source vCenter: server must not be empty")
 	}
 	if len(selected.Datacenters) != 1 || selected.Datacenters[0] == "" {
-		return nil, fmt.Errorf("validating source vCenter %q: exactly one datacenter must be configured for VMotion", server)
+		return nil, "", fmt.Errorf("validating source vCenter %q: exactly one datacenter must be configured for VMotion", server)
 	}
 	if datacenter != "" && selected.Datacenters[0] != datacenter {
-		return nil, fmt.Errorf("validating source vCenter %q: datacenter changed from frozen value %q to %q", server, datacenter, selected.Datacenters[0])
+		return nil, "", fmt.Errorf("validating source vCenter %q: datacenter changed from frozen value %q to %q", server, datacenter, selected.Datacenters[0])
 	}
-	return selected, nil
+	// Preserve the frozen spelling in inventory references and plan fingerprints.
+	sourceVC := selected.DeepCopy()
+	sourceVC.Server = server
+	return sourceVC, selected.Server, nil
 }
 
 func validateVMotionVCenterScope(infrastructure *configv1.Infrastructure, sourceVCenter, destinationVCenter string) error {
@@ -458,7 +464,7 @@ func validateVMotionSourceFailureDomainReferences(failureDomains []configv1.VSph
 	return nil
 }
 
-func (r *VmwareCloudFoundationMigrationReconciler) listVMotionVMInventory(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, biosUUIDs []string) (vsphere.VMotionInventory, error) {
+func (r *VmwareCloudFoundationMigrationReconciler) listVMotionVMInventory(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, liveServer string, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, biosUUIDs []string) (vsphere.VMotionInventory, error) {
 	vsphereCtx, cancel := context.WithTimeout(ctx, preflightVSphereTimeout)
 	defer cancel()
 
@@ -471,15 +477,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) listVMotionVMInventory(ctx co
 	if r.vmotionInventoryFunc != nil {
 		return r.vmotionInventoryFunc(vsphereCtx, sourceVC, sourceFDs, biosUUIDs)
 	}
-	username, password, err := openshift.NewSecretManager(r.KubeClient).GetCredentials(vsphereCtx, sourceVC.Server)
+	username, password, err := openshift.NewSecretManager(r.KubeClient).GetCredentials(vsphereCtx, liveServer)
 	if err != nil {
-		return vsphere.VMotionInventory{}, fmt.Errorf("getting credentials for source vCenter %s: %w", sourceVC.Server, err)
+		return vsphere.VMotionInventory{}, fmt.Errorf("getting credentials for source vCenter %s: %w", liveServer, err)
 	}
 	session, err := vsphere.NewSession(vsphereCtx, vsphere.Params{
-		Server: sourceVC.Server, Datacenter: sourceVC.Datacenters[0], Username: username, Password: password,
+		Server: liveServer, Datacenter: sourceVC.Datacenters[0], Username: username, Password: password,
 	})
 	if err != nil {
-		return vsphere.VMotionInventory{}, fmt.Errorf("connecting to source vCenter %s/%s: %w", sourceVC.Server, sourceVC.Datacenters[0], err)
+		return vsphere.VMotionInventory{}, fmt.Errorf("connecting to source vCenter %s/%s: %w", liveServer, sourceVC.Datacenters[0], err)
 	}
 	defer func() {
 		closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(vsphereCtx), 30*time.Second)

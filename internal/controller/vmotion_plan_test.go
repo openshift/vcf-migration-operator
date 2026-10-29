@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -343,7 +345,7 @@ func newVMotionPlanHarness(t *testing.T) *vmotionPlanHarness {
 		Recorder: events.NewFakeRecorder(10),
 		vmotionInventoryFunc: func(_ context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
 			harness.inventoryCalls++
-			if sourceVC.Server != sourceServer || len(ids) != harness.expectedInventoryCount {
+			if !sameVMotionVCenter(sourceVC.Server, sourceServer) || len(ids) != harness.expectedInventoryCount {
 				t.Fatalf("VM inventory request = source %q and %d identities, want source %q and %d identities", sourceVC.Server, len(ids), sourceServer, harness.expectedInventoryCount)
 			}
 			fdRefs := make(map[string]vsphere.VMotionManagedObjectReference, len(sourceFDs))
@@ -638,17 +640,103 @@ func TestVMotionSourceVCenterUsesFrozenPlanIdentity(t *testing.T) {
 	infrastructure.Spec.PlatformSpec.VSphere.VCenters[0].Datacenters = []string{vmotionPlanTestSourceDatacenter}
 	infrastructure.Spec.PlatformSpec.VSphere.VCenters[1].Datacenters = []string{"TargetDC"}
 
-	got, err := vmotionSourceVCenter(migration, infrastructure)
+	got, liveServer, err := vmotionSourceVCenter(migration, infrastructure)
 	if err != nil {
 		t.Fatalf("vmotionSourceVCenter: %v", err)
 	}
 	if got.Server != cleanupTestSource || len(got.Datacenters) != 1 || got.Datacenters[0] != vmotionPlanTestSourceDatacenter {
 		t.Fatalf("source vCenter = %+v, want frozen source identity", got)
 	}
+	if liveServer != cleanupTestSource {
+		t.Fatalf("live server = %q, want %q", liveServer, cleanupTestSource)
+	}
 	emptyServerInfrastructure := newInfrastructureForReadyTest([]string{""})
 	emptyServerInfrastructure.Spec.PlatformSpec.VSphere.VCenters[0].Datacenters = []string{vmotionPlanTestSourceDatacenter}
-	if _, err := vmotionSourceVCenter(newVMotionPlanMigration(), emptyServerInfrastructure); err == nil || !strings.Contains(err.Error(), "server must not be empty") {
+	if _, _, err := vmotionSourceVCenter(newVMotionPlanMigration(), emptyServerInfrastructure); err == nil || !strings.Contains(err.Error(), "server must not be empty") {
 		t.Fatalf("empty source server error = %v, want missing server error", err)
+	}
+}
+
+func TestVMotionSourceVCenterMatchesEquivalentServers(t *testing.T) {
+	tests := []struct {
+		name         string
+		frozenServer string
+		statusServer string
+		servers      []string
+		wantErr      string
+	}{
+		{name: "live case changed", frozenServer: cleanupTestSource, servers: []string{"Source.Example.Com"}},
+		{name: "live URL variant", statusServer: cleanupTestSource, servers: []string{"https://SOURCE.example.com/sdk"}},
+		{name: "persisted case differs", frozenServer: cleanupTestSource, statusServer: "Source.Example.Com", servers: []string{cleanupTestSource}},
+		{name: "persisted URL differs", frozenServer: "https://SOURCE.example.com/sdk", statusServer: cleanupTestSource, servers: []string{cleanupTestSource}},
+		{name: "persisted identities disagree", frozenServer: cleanupTestSource, statusServer: "other.example.com", servers: []string{cleanupTestSource}, wantErr: "persisted source identities disagree"},
+		{name: "different live server", frozenServer: cleanupTestSource, servers: []string{"other.example.com"}, wantErr: "no Infrastructure entry matches"},
+		{name: "equivalent duplicate entries", frozenServer: cleanupTestSource, servers: []string{cleanupTestSource, "Source.Example.Com"}, wantErr: "multiple Infrastructure entries match"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			migration := newVMotionPlanMigration()
+			migration.Status.SourceVCenter = tt.statusServer
+			if tt.frozenServer != "" {
+				migration.Status.NodeMigration = &migrationv1alpha1.NodeMigrationStatus{
+					FrozenPlan: &migrationv1alpha1.NodeMigrationFrozenPlan{
+						SourceVCenter: tt.frozenServer, SourceDatacenter: vmotionPlanTestSourceDatacenter,
+					},
+				}
+			}
+			infrastructure := newInfrastructureForReadyTest(tt.servers)
+			for i := range infrastructure.Spec.PlatformSpec.VSphere.VCenters {
+				infrastructure.Spec.PlatformSpec.VSphere.VCenters[i].Datacenters = []string{vmotionPlanTestSourceDatacenter}
+			}
+			got, liveServer, err := vmotionSourceVCenter(migration, infrastructure)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("vmotionSourceVCenter error = %v, want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("vmotionSourceVCenter: %v", err)
+			}
+			if got.Datacenters[0] != vmotionPlanTestSourceDatacenter {
+				t.Fatalf("source vCenter = %+v, want matching source datacenter", got)
+			}
+			wantServer := tt.frozenServer
+			if wantServer == "" {
+				wantServer = tt.statusServer
+			}
+			if got.Server != wantServer {
+				t.Fatalf("source server = %q, want persisted spelling %q", got.Server, wantServer)
+			}
+			if liveServer != tt.servers[0] {
+				t.Fatalf("live server = %q, want Infrastructure spelling %q", liveServer, tt.servers[0])
+			}
+			if infrastructure.Spec.PlatformSpec.VSphere.VCenters[0].Server != tt.servers[0] {
+				t.Fatal("resolving source server mutated Infrastructure")
+			}
+		})
+	}
+}
+
+func TestVMotionReconcilePreservesPlanAfterSourceServerCaseChange(t *testing.T) {
+	h := newVMotionPlanHarness(t)
+	h.reconcileUntilFrozen(t)
+	original := h.migration.Status.NodeMigration.DeepCopy()
+	infrastructure, err := h.reconciler.ConfigClient.ConfigV1().Infrastructures().Get(context.Background(), openshift.InfrastructureName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting Infrastructure: %v", err)
+	}
+	infrastructure.Spec.PlatformSpec.VSphere.VCenters[0].Server = "Source.Example.Com"
+	if _, err := h.reconciler.ConfigClient.ConfigV1().Infrastructures().Update(context.Background(), infrastructure, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("updating Infrastructure: %v", err)
+	}
+	h.reconcile(t)
+	condition := apimeta.FindStatusCondition(h.migration.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)
+	if condition == nil || condition.Reason != migrationv1alpha1.ReasonProgressing {
+		t.Fatalf("InfrastructurePrepared = %+v, want Progressing after equivalent source server edit", condition)
+	}
+	if h.migration.Status.NodeMigration.ExecutionID != original.ExecutionID || h.migration.Status.NodeMigration.PlanFingerprint != original.PlanFingerprint {
+		t.Fatal("equivalent source server edit replaced the frozen plan")
 	}
 }
 
@@ -678,6 +766,67 @@ func TestVMotionMachineEligibilityBlocksConflictingBindings(t *testing.T) {
 	}
 }
 
+func TestVMotionInventoryUsesLiveServerSpelling(t *testing.T) {
+	for _, variant := range []string{"case", "URL"} {
+		t.Run(variant, func(t *testing.T) {
+			helloNames := make(chan string, 1)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			server.TLS = &tls.Config{
+				GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+					helloNames <- hello.ServerName
+					return nil, nil
+				},
+			}
+			server.StartTLS()
+			defer server.Close()
+			_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+			if err != nil {
+				t.Fatalf("SplitHostPort: %v", err)
+			}
+			liveServer := net.JoinHostPort("localhost", port)
+			frozenServer := strings.ToUpper(liveServer)
+			if variant == "URL" {
+				frozenServer = "https://" + liveServer + "/sdk"
+			}
+			migration := newVMotionPlanMigration()
+			migration.Status.NodeMigration = &migrationv1alpha1.NodeMigrationStatus{
+				FrozenPlan: &migrationv1alpha1.NodeMigrationFrozenPlan{
+					SourceVCenter: frozenServer, SourceDatacenter: vmotionPlanTestSourceDatacenter,
+				},
+			}
+			infrastructure := newInfrastructureForReadyTest([]string{liveServer})
+			infrastructure.Spec.PlatformSpec.VSphere.VCenters[0].Datacenters = []string{vmotionPlanTestSourceDatacenter}
+			sourceVC, connectionServer, err := vmotionSourceVCenter(migration, infrastructure)
+			if err != nil {
+				t.Fatalf("vmotionSourceVCenter: %v", err)
+			}
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: openshift.VSphereCredsSecretName, Namespace: openshift.VSphereCredsSecretNamespace},
+				Data: map[string][]byte{
+					liveServer + ".username": []byte("user"),
+					liveServer + ".password": []byte("password"),
+				},
+			}
+			r := &VmwareCloudFoundationMigrationReconciler{KubeClient: fakekube.NewClientset(secret)}
+			_, err = r.listVMotionVMInventory(context.Background(), sourceVC, connectionServer, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), "tls: failed to verify certificate") {
+				t.Fatalf("listVMotionVMInventory error = %v, want live credentials accepted followed by untrusted TLS rejection", err)
+			}
+			select {
+			case name := <-helloNames:
+				if name != "localhost" {
+					t.Fatalf("TLS server name = %q, want live server spelling localhost", name)
+				}
+			default:
+				t.Fatal("inventory did not reach the live TLS endpoint")
+			}
+			if sourceVC.Server != frozenServer {
+				t.Fatalf("source identity = %q, want frozen spelling %q", sourceVC.Server, frozenServer)
+			}
+		})
+	}
+}
+
 func TestVMotionInventoryRejectsUntrustedSourceCertificate(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()
@@ -693,6 +842,7 @@ func TestVMotionInventoryRejectsUntrustedSourceCertificate(t *testing.T) {
 	_, err := r.listVMotionVMInventory(
 		context.Background(),
 		&configv1.VSpherePlatformVCenterSpec{Server: serverName, Datacenters: []string{vmotionPlanTestSourceDatacenter}},
+		serverName,
 		nil,
 		[]string{"11111111-1111-4111-8111-111111111111"},
 	)
@@ -720,6 +870,7 @@ func TestListVMotionVMInventoryUsesBoundedContext(t *testing.T) {
 	_, err := r.listVMotionVMInventory(
 		context.Background(),
 		&configv1.VSpherePlatformVCenterSpec{Server: cleanupTestSource, Datacenters: []string{vmotionPlanTestSourceDatacenter}},
+		cleanupTestSource,
 		nil,
 		nil,
 	)

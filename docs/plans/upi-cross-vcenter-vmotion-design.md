@@ -126,7 +126,7 @@ Resolve all planned Nodes to their unique expected source VMs using the qualifie
 
 Use `CheckRelocate_Task` against the intended VM/specification; omit `testType` to request all native tests. The documented groups cover source/host checks, destination datastore visibility, NIC-target network visibility, and resource-pool support. Do not promote those group descriptions into an exhaustive version-independent compatibility guarantee.
 
-Leave the target host unset so the destination cluster selects it. Do not interpret another candidate's pass as approval for the selected target specification. Revalidate frozen identity, destination placement, and specifications; after relocation, record and verify the observed host. Do not build a custom capacity/placement optimizer.
+Leave the target host unset so destination-cluster DRS selects it. This intentionally replaces the earlier explicit deterministic host-selection procedure. Do not interpret another candidate's pass as approval for the selected target specification. Revalidate frozen identity, destination placement, and specifications; after relocation, record the observed host and verify that it belongs to the frozen destination cluster. Do not build a custom capacity/placement optimizer.
 
 ### Result handling
 
@@ -343,7 +343,7 @@ Run repository-required generation, formatting, lint, unit/simulator and bundle 
 The design choices above are settled directions, not completed engineering work. Before enablement, record evidence for:
 
 - **G1 — API/status:** final optional engine/mode/recovery fields, compatibility/defaults/immutability, sanitized plan fingerprint, bounded field/state representation, merge/conflict rules and supported object-size bounds.
-- **G2 — vSphere integration:** actual `CheckRelocate_Task` result handling/empty semantics, source/target references, deterministic host selection, SDK retry behavior, selected power-on API/result/placement contract, and applicable action/inheritance permissions.
+- **G2 — vSphere integration:** actual `CheckRelocate_Task` result handling/empty semantics, source/target references, DRS-deferred host selection and observed-host verification against the frozen destination cluster, SDK retry behavior, selected power-on API/result/placement contract, and applicable action/inheritance permissions.
 - **G3 — Supported combinations:** exact OCP build, vCenter/ESXi versions and cross-major directions, DRS/pool/boot-device combinations and existing address families qualified for Hot/Cold. No exclusions or support guarantees inferred from an API's minimum version alone.
 - **G4 — etcd integration/security:** credential authority/delivery/rotation, precise RBAC, expected member-to-Node binding, bounded reads/polling/freshness, guard-respecting drain and supported OCP integration.
 - **G5 — Configuration/availability:** exact OCP 5.0 consumers and reliable reload/readiness proxy; operator standby readiness, label/anti-affinity/PDB/rolling strategy, OLM/direct-install manifests and eviction/failover evidence.
