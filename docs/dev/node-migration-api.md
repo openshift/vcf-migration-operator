@@ -87,9 +87,20 @@ runtime-tested against the intended environment.
 
 Machine ownership is checked per planned Node through `Machine.status.nodeRef`
 UID, Machine `spec.providerID`, and a Node's `machine.openshift.io/machine`
-annotation when it resolves to a live Machine. Unrelated dangling Machines do
-not establish ownership. Any Machine in Provisioning, Provisioned, or Deleting
-phase, or with a deletion timestamp, blocks admission separately.
+annotation when it resolves to a live Machine. A resolved-absent annotation is
+retained and permitted only after complete ownership, identity, non-termination
+and quiescence checks. Contradictory live associations and IP-only candidates are
+Indeterminate, not proof of ownership or being unmanaged.
+
+Machines in Provisioning, Provisioned, or Deleting phase, or with a deletion
+timestamp, block admission separately. Empty/unrecognized phases and inconsistent
+Running evidence also block. Unassociated Failed history requires resolved
+parent/remediation context. The planner reads MachineSets, CPMS and MHCs before
+and after VM inventory, compares parent intent/status with real children, permits
+settled zero-replica MachineSets and Inactive CPMS, and rejects unsettled capacity,
+replacement or applicable remediation. These are read-only observations, not
+external-operation fencing. See [the approved B/C policy](vmotion-eligibility.md)
+for exact checks, CAPI scope, qualification limits and deferred engine-switch A.
 
 The plan consumes the effective mapping in `status.failureDomainMappings` and
 freezes its execution identity, source/destination, mode, Node/VM identities,

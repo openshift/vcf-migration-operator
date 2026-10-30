@@ -122,6 +122,27 @@ An unhealthy Machine API or zero Running Machines alone is never proof of UPI. D
 
 Resolve all planned Nodes to their unique expected source VMs using the qualified providerID/BIOS-UUID identity contract, not an assumption that Node and VM names match. Freeze Node UID/providerID, VM identity, role, selected source FD/owner reference, intended target mapping, and original scheduling state. Establish Machine ownership per planned Node using supported NodeRef UID, providerID, and Node annotation associations.
 
+### Approved Machine API evidence policy (B/C review)
+
+Absent/empty or unrecognized Machine phases do not establish quiescence; they
+are Indeterminate. Evaluate current ownership first, then phase, parent intent,
+actual child inventory, generation/status freshness, and applicable remediation.
+Unassociated Failed objects are historical candidates only when that context is
+resolved and inactive. The release inspects Machine API resources; CAPI and API
+authority handover are outside this release's qualification scope.
+
+A parseable Node Machine annotation whose target is absent after successful
+complete reads is resolved-absent historical evidence, not an ownership proof or
+an automatic reason to block forever. All other identity/ownership, non-deletion
+and quiescence checks must still pass. Conflicting live UID/providerID evidence,
+failed reads, malformed references and IP-only Machine association candidates are
+Indeterminate and block. Never infer VM identity from IP or clear the annotation.
+
+Re-read Node and Machine API eligibility after source VM inventory before plan
+persistence. This is a fresh observation, not cross-controller fencing. Exact
+implemented checks and the explicitly deferred engine-switch limitation A are
+documented in [`docs/dev/vmotion-eligibility.md`](../dev/vmotion-eligibility.md).
+
 ## 6. Native feasibility and per-node sequences
 
 Use `CheckRelocate_Task` against the intended VM/specification; omit `testType` to request all native tests. The documented groups cover source/host checks, destination datastore visibility, NIC-target network visibility, and resource-pool support. Do not promote those group descriptions into an exhaustive version-independent compatibility guarantee.

@@ -551,7 +551,8 @@ func TestVMotionMachineEligibilityUsesPerNodeAssociations(t *testing.T) {
 	providerID := "vsphere://11111111-1111-4111-8111-111111111111"
 	node := newVMotionPlanNode("worker-a", "worker", providerID, "node-uid-a", false)
 	newMachine := func() machinev1beta1.Machine {
-		return machinev1beta1.Machine{ObjectMeta: metav1.ObjectMeta{Namespace: openshift.MachineAPINamespace, Name: "machine-a"}}
+		phase := machinev1beta1.PhaseFailed
+		return machinev1beta1.Machine{ObjectMeta: metav1.ObjectMeta{Namespace: openshift.MachineAPINamespace, Name: "machine-a"}, Status: machinev1beta1.MachineStatus{Phase: &phase}}
 	}
 	tests := []struct {
 		name     string
