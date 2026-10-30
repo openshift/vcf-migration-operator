@@ -52,7 +52,7 @@ func ListVMotionVMInventory(ctx context.Context, s *Session, vcenter string, sou
 	if err != nil {
 		return VMotionInventory{}, fmt.Errorf("finding source datacenter %q: %w", s.Datacenter, err)
 	}
-	scopePrefix := "/" + s.Datacenter + "/host/"
+	scopePrefix := strings.TrimRight(datacenter.InventoryPath, "/") + "/host/"
 	for _, failureDomain := range sourceFailureDomains {
 		if failureDomain.Name == "" || failureDomain.ComputeResourcePath == "" {
 			return VMotionInventory{}, fmt.Errorf("resolving source failure domain %q: name and compute-resource path must not be empty", failureDomain.Name)
