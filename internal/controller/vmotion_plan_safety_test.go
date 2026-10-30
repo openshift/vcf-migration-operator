@@ -276,10 +276,18 @@ func TestParseVMotionMachineReference(t *testing.T) {
 	}{
 		{value: "machine-a", want: "openshift-machine-api/machine-a"},
 		{value: "namespace/machine-a", want: "namespace/machine-a"},
+		{value: "namespace/machine.a", want: "namespace/machine.a"},
 		{value: ""},
 		{value: "/name"},
 		{value: "ns/"},
 		{value: "ns/name/extra"},
+		{value: "namespace/bad name"},
+		{value: "bad namespace/machine-a"},
+		{value: "namespace/UPPERCASE"},
+		{value: "namespace/-machine"},
+		{value: "dotted.namespace/machine-a"},
+		{value: strings.Repeat("a", 64) + "/machine-a"},
+		{value: "namespace/" + strings.Repeat("a", 254)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.value, func(t *testing.T) {

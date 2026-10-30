@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
@@ -223,11 +224,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) freezeVMotionPlan(ctx context
 	if r.MachineClient == nil {
 		return r.retryVMotionPlan(ctx, migration, baseStatus, fmt.Errorf("checking Machine ownership for VMotion planning: Machine API client is not configured"))
 	}
-	machines, err := r.MachineClient.MachineV1beta1().Machines("").List(ctx, metav1.ListOptions{})
+	machineAPI, err := r.readVMotionMachineAPI(ctx)
 	if err != nil {
-		return r.retryVMotionPlan(ctx, migration, baseStatus, fmt.Errorf("listing Machines for VMotion planning: %w", err))
+		return r.retryVMotionPlan(ctx, migration, baseStatus, err)
 	}
-	if err := validateVMotionMachineEligibility(identities, machines.Items); err != nil {
+	if err := machineAPI.validate(identities); err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
 	}
 	biosUUIDs := make([]string, 0, len(identities))
@@ -237,6 +238,26 @@ func (r *VmwareCloudFoundationMigrationReconciler) freezeVMotionPlan(ctx context
 	inventory, err := r.listVMotionVMInventory(ctx, sourceVC, liveServer, sourceFDs, biosUUIDs)
 	if err != nil {
 		return r.retryVMotionPlan(ctx, migration, baseStatus, err)
+	}
+	// Inventory may take time. Re-read eligibility before persisting a plan so
+	// new phase-less Machines or changed Node associations cannot be overlooked.
+	latestNodes, err := r.KubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return r.retryVMotionPlan(ctx, migration, baseStatus, fmt.Errorf("relisting Nodes after VMotion inventory: %w", err))
+	}
+	if err := validateVMotionNodeRoles(latestNodes.Items); err != nil {
+		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
+	}
+	identities, err = collectVMotionNodeIdentities(latestNodes.Items)
+	if err != nil {
+		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
+	}
+	machineAPI, err = r.readVMotionMachineAPI(ctx)
+	if err != nil {
+		return r.retryVMotionPlan(ctx, migration, baseStatus, err)
+	}
+	if err := machineAPI.validate(identities); err != nil {
+		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
 	}
 	if err := validateVMotionSourceFailureDomainReferences(sourceFDs, inventory.SourceFailureDomainReferences, sourceVC.Server, sourceVC.Datacenters[0]); err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
@@ -291,6 +312,9 @@ func collectVMotionNodeIdentities(nodes []corev1.Node) ([]vmotionNodeIdentity, e
 		}
 		if node.Name == "" || node.UID == "" {
 			return nil, fmt.Errorf("planning VMotion Node %q: Node name and UID must be present", node.Name)
+		}
+		if !node.DeletionTimestamp.IsZero() {
+			return nil, fmt.Errorf("planning VMotion Node %q: Node is terminating; wait for deletion to settle", node.Name)
 		}
 		biosUUID, err := parseVMotionProviderID(node.Spec.ProviderID)
 		if err != nil {
@@ -764,10 +788,7 @@ func hasNodeRole(labels map[string]string, role string) bool {
 }
 
 func validateVMotionMachineEligibility(identities []vmotionNodeIdentity, machines []machinev1beta1.Machine) error {
-	indexes, err := buildVMotionMachineIndexes(identities, machines)
-	if err != nil {
-		return err
-	}
+	indexes := buildVMotionMachineIndexes(identities, machines)
 	annotationNodes, err := vmotionMachineAnnotationNodes(identities, indexes.machineRefs)
 	if err != nil {
 		return err
@@ -808,6 +829,11 @@ func validateVMotionMachineEligibility(identities []vmotionNodeIdentity, machine
 			}
 		}
 	}
+	for i := range machines {
+		if err := validateVMotionMachinePhase(&machines[i]); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -816,34 +842,33 @@ type vmotionMachineIndexes struct {
 	nodeByUID   map[types.UID]vmotionNodeIdentity
 	nodeByName  map[string]vmotionNodeIdentity
 	nodeByBIOS  map[string]vmotionNodeIdentity
+	nodeByIP    map[string][]types.UID
 }
 
-func buildVMotionMachineIndexes(identities []vmotionNodeIdentity, machines []machinev1beta1.Machine) (*vmotionMachineIndexes, error) {
+func buildVMotionMachineIndexes(identities []vmotionNodeIdentity, machines []machinev1beta1.Machine) *vmotionMachineIndexes {
 	indexes := &vmotionMachineIndexes{
 		machineRefs: make(map[string]struct{}, len(machines)),
 		nodeByUID:   make(map[types.UID]vmotionNodeIdentity, len(identities)),
 		nodeByName:  make(map[string]vmotionNodeIdentity, len(identities)),
 		nodeByBIOS:  make(map[string]vmotionNodeIdentity, len(identities)),
+		nodeByIP:    make(map[string][]types.UID),
 	}
 	for i := range identities {
 		identity := identities[i]
 		indexes.nodeByUID[identity.node.UID] = identity
 		indexes.nodeByName[identity.node.Name] = identity
 		indexes.nodeByBIOS[identity.biosUUID] = identity
+		for _, address := range identity.node.Status.Addresses {
+			if address.Type == corev1.NodeInternalIP && address.Address != "" {
+				indexes.nodeByIP[address.Address] = append(indexes.nodeByIP[address.Address], identity.node.UID)
+			}
+		}
 	}
 	for i := range machines {
 		machine := &machines[i]
-		phase := ""
-		if machine.Status.Phase != nil {
-			phase = *machine.Status.Phase
-		}
-		if machine.DeletionTimestamp != nil || phase == machinev1beta1.PhaseProvisioning ||
-			phase == machinev1beta1.PhaseProvisioned || phase == machinev1beta1.PhaseDeleting {
-			return nil, fmt.Errorf("machine %s/%s is in active provisioning phase %q; wait for provisioning or deletion to settle before VMotion", machine.Namespace, machine.Name, phase)
-		}
 		indexes.machineRefs[machine.Namespace+"/"+machine.Name] = struct{}{}
 	}
-	return indexes, nil
+	return indexes
 }
 
 func vmotionMachineAnnotationNodes(identities []vmotionNodeIdentity, machineRefs map[string]struct{}) (map[string]map[types.UID]bool, error) {
@@ -895,22 +920,57 @@ func vmotionMachineNodeLinks(machine *machinev1beta1.Machine, machineRef string,
 	for uid := range annotations {
 		linkedNodes[uid] = true
 	}
+	if err := validateVMotionAssociationEvidence(machine, machineRef, indexes, linkedNodes); err != nil {
+		return nil, err
+	}
 	return linkedNodes, nil
+}
+
+func validateVMotionAssociationEvidence(machine *machinev1beta1.Machine, machineRef string, indexes *vmotionMachineIndexes, linkedNodes map[types.UID]bool) error {
+	if len(linkedNodes) == 1 {
+		for uid := range linkedNodes {
+			identity := indexes.nodeByUID[uid]
+			if ref := machine.Status.NodeRef; ref != nil && ((ref.UID != "" && ref.UID != uid) || (ref.Name != "" && ref.Name != identity.node.Name)) {
+				return fmt.Errorf("machine %s has contradictory NodeRef and association evidence for Node %q; ownership is indeterminate", machineRef, identity.node.Name)
+			}
+			if machine.Spec.ProviderID != nil && *machine.Spec.ProviderID != "" {
+				biosUUID, err := parseVMotionProviderID(*machine.Spec.ProviderID)
+				if err != nil || biosUUID != identity.biosUUID {
+					return fmt.Errorf("machine %s has contradictory or invalid providerID evidence for Node %q; ownership is indeterminate", machineRef, identity.node.Name)
+				}
+			}
+		}
+	}
+	// NodeLink falls back to internal IP after providerID lookup. An IP-only
+	// candidate can acquire a link, but is never sufficient VM identity here.
+	for _, address := range machine.Status.Addresses {
+		if address.Type != corev1.NodeInternalIP || address.Address == "" {
+			continue
+		}
+		for _, uid := range indexes.nodeByIP[address.Address] {
+			if !linkedNodes[uid] {
+				return fmt.Errorf("machine %s has an IP-only association with Node %q; ownership is indeterminate", machineRef, indexes.nodeByUID[uid].node.Name)
+			}
+		}
+	}
+	return nil
 }
 
 func parseVMotionMachineReference(value string) (string, error) {
 	parts := strings.Split(value, "/")
+	namespace, name := openshift.MachineAPINamespace, ""
 	switch len(parts) {
 	case 1:
-		if parts[0] != "" {
-			return openshift.MachineAPINamespace + "/" + parts[0], nil
-		}
+		name = parts[0]
 	case 2:
-		if parts[0] != "" && parts[1] != "" {
-			return parts[0] + "/" + parts[1], nil
-		}
+		namespace, name = parts[0], parts[1]
+	default:
+		return "", fmt.Errorf("annotation value %q must be a Machine name or namespace/name", value)
 	}
-	return "", fmt.Errorf("annotation value %q must be a Machine name or namespace/name", value)
+	if len(validation.IsDNS1123Label(namespace)) > 0 || len(validation.IsDNS1123Subdomain(name)) > 0 {
+		return "", fmt.Errorf("annotation value %q must be a Machine name or namespace/name with valid Kubernetes names", value)
+	}
+	return namespace + "/" + name, nil
 }
 
 func (r *VmwareCloudFoundationMigrationReconciler) blockVMotionPlan(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus, message string) (ctrl.Result, error) {
