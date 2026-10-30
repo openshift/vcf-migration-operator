@@ -32,10 +32,12 @@ import (
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
 	machineconfigclient "github.com/openshift/client-go/machineconfiguration/clientset/versioned"
 	"github.com/vmware/govmomi/find"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
@@ -43,9 +45,11 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
@@ -109,6 +113,7 @@ type VmwareCloudFoundationMigrationReconciler struct {
 // The reconciler processes the first condition that is not True and returns.
 var conditionOrder = []string{
 	migrationv1alpha1.ConditionInfrastructurePrepared,
+	migrationv1alpha1.ConditionStoragePlanned,
 	migrationv1alpha1.ConditionDestinationInitialized,
 	migrationv1alpha1.ConditionMultiSiteConfigured,
 	migrationv1alpha1.ConditionWorkloadMigrated,
@@ -207,15 +212,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 			reason = migrationv1alpha1.ReasonUnsupportedNamespace
 			message = fmt.Sprintf("only a VmwareCloudFoundationMigration in namespace %q is reconciled by this operator", migrationv1alpha1.SingletonNamespace)
 		}
-		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
-		alreadyRecorded := cond != nil &&
-			cond.Status == metav1.ConditionFalse &&
-			cond.Reason == reason &&
-			cond.ObservedGeneration == migration.Generation
-		if !alreadyRecorded {
-			log.Info("ignoring VmwareCloudFoundationMigration with unsupported name or namespace; only a single resource is reconciled", "expectedName", migrationv1alpha1.SingletonName, "actualName", migration.Name, "expectedNamespace", migrationv1alpha1.SingletonNamespace, "actualNamespace", migration.Namespace)
+		if r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, reason, message) {
+			log.Info(message, "expectedName", migrationv1alpha1.SingletonName, "actualName", migration.Name, "expectedNamespace", migrationv1alpha1.SingletonNamespace, "actualNamespace", migration.Namespace)
 			r.Recorder.Eventf(migration, nil, "Warning", reason, reason, "%s", message)
-			r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, reason, message)
 			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -251,16 +250,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 			return ctrl.Result{}, nil
 		}
 
-		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
-		alreadyRecorded := cond != nil &&
-			cond.Status == metav1.ConditionFalse &&
-			cond.Reason == migrationv1alpha1.ReasonDeletionBlocked &&
-			cond.ObservedGeneration == migration.Generation
-		if !alreadyRecorded {
-			message := fmt.Sprintf("deletion is blocked until the migration completes or an administrator sets the annotation %s=\"true\"", migrationv1alpha1.AnnotationAllowDeletion)
+		message := fmt.Sprintf("deletion is blocked until the migration completes or an administrator sets the annotation %s=\"true\"", migrationv1alpha1.AnnotationAllowDeletion)
+		if r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonDeletionBlocked, message) {
 			log.Info("retaining deleted migration record while work is outstanding")
 			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonDeletionBlocked, migrationv1alpha1.ReasonDeletionBlocked, "%s", message)
-			r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonDeletionBlocked, message)
 			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -271,60 +264,64 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	return r.reconcileWorkflow(ctx, migration, baseStatus)
 }
 
+// reconcileState handles planning, pause, and resume conditions before the workflow runs.
+// It reports whether processing must stop, including when persisting status fails.
+func (r *VmwareCloudFoundationMigrationReconciler) reconcileState(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (bool, error) {
+	log := klog.FromContext(ctx)
+	state := migration.Spec.State
+	if (state == migrationv1alpha1.MigrationStatePlanning || state == migrationv1alpha1.MigrationStatePending || state == "") && migration.Status.StartTime != nil {
+		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanningAfterStart, "Migration has started; set spec.state to Running or Paused")
+		return true, r.updateStatus(ctx, migration, baseStatus)
+	}
+
+	if state != migrationv1alpha1.MigrationStateRunning && state != migrationv1alpha1.MigrationStatePlanning {
+		log.V(1).Info("migration not in Running state, skipping", "state", migration.Spec.State)
+
+		if migration.Spec.State == migrationv1alpha1.MigrationStatePaused {
+			msg := fmt.Sprintf("Migration is paused; set spec.state to %s to resume", migrationv1alpha1.MigrationStateRunning)
+			changed := r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPaused, msg)
+			if changed && r.Recorder != nil {
+				r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ReasonPaused, migrationv1alpha1.ReasonPaused, "%s", msg)
+			}
+		}
+		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+	if state == migrationv1alpha1.MigrationStatePlanning {
+		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanning, "Running non-disruptive migration checks")
+	}
+
+	// Clear the planning or pause message when entering Running.
+	cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+	if state == migrationv1alpha1.MigrationStateRunning && cond != nil && isPlanningOrPausedReason(cond.Reason) {
+		// A current-generation storage blocker stays until storage planning
+		// passes; resetting it here would flip Ready on every reconcile.
+		keepPlanBlocked := cond.Reason == migrationv1alpha1.ReasonPlanBlocked && cond.ObservedGeneration == migration.Generation
+		if !keepPlanBlocked {
+			log.V(1).Info("migration entering Running state, updating Ready condition")
+			r.setReadyRunning(migration)
+		}
+	}
+
+	return false, nil
+}
+
 // reconcileWorkflow processes migration state only after singleton and deletion guards pass.
 func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (ctrl.Result, error) {
 	log := klog.FromContext(ctx)
 
-	if migration.Spec.State != migrationv1alpha1.MigrationStateRunning {
-		log.V(1).Info("migration not in Running state, skipping", "state", migration.Spec.State)
-		if migration.Spec.State == migrationv1alpha1.MigrationStatePaused {
-			cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
-			alreadyRecorded := cond != nil &&
-				cond.Status == metav1.ConditionFalse &&
-				cond.Reason == migrationv1alpha1.ReasonPaused &&
-				cond.ObservedGeneration == migration.Generation
-			if !alreadyRecorded {
-				msg := fmt.Sprintf("Migration is paused; set spec.state to %s to resume", migrationv1alpha1.MigrationStateRunning)
-				if r.Recorder != nil {
-					r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ReasonPaused, migrationv1alpha1.ReasonPaused, "%s", msg)
-				}
-				r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPaused, msg)
-			}
-		}
-		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+	if stop, err := r.reconcileState(ctx, migration, baseStatus); stop {
+		return ctrl.Result{}, err
 	}
-
-	// If resuming from Paused, clear the Paused condition on Ready and set it to Progressing.
-	cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
-	if cond != nil && cond.Reason == migrationv1alpha1.ReasonPaused {
-		log.V(1).Info("migration resumed from Paused state, updating Ready condition")
-		msg := "Migration is running"
-		if r.Recorder != nil {
-			r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ReasonProgressing, migrationv1alpha1.ReasonProgressing, "%s", msg)
-		}
-		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
-		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Set start time on first reconcile in Running state.
-	if migration.Status.StartTime == nil {
-		now := metav1.Now()
-		migration.Status.StartTime = &now
-		r.Recorder.Eventf(migration, nil, "Normal", "MigrationStarted", "MigrationStarted", "Migration workflow started")
-		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
+	state := migration.Spec.State
 
 	// Walk conditions in order; execute work for the first non-True condition.
 	type conditionHandler func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error)
 	handlers := map[string]conditionHandler{
 		migrationv1alpha1.ConditionInfrastructurePrepared: r.ensureInfrastructurePrepared,
+		migrationv1alpha1.ConditionStoragePlanned:         r.ensureStoragePlanned,
 		migrationv1alpha1.ConditionDestinationInitialized: r.ensureDestinationInitialized,
 		migrationv1alpha1.ConditionMultiSiteConfigured:    r.ensureMultiSiteConfigured,
 		migrationv1alpha1.ConditionWorkloadMigrated:       r.ensureWorkloadMigrated,
@@ -337,14 +334,30 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 	}
 
 	r.seedReadyCondition(migration)
-	ctx = r.executionContext(ctx, migration)
+	ctx = r.stateContext(ctx, migration, state)
 
 	for _, condType := range conditionOrder {
-		if r.isConditionTrue(migration, condType) {
+
+		if state == migrationv1alpha1.MigrationStatePlanning && !isPlanningCondition(condType) {
+			r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanComplete, "Plan has no blockers; set spec.state to Running to start")
+			return ctrl.Result{RequeueAfter: planningResync}, r.updateStatus(ctx, migration, baseStatus)
+		}
+
+		// skip the current handler of condition for now if it is already complete
+		// TODO: We need to revisit this for storage migration again
+		skipCondition := isConditionComplete(migration, condType)
+
+		// Keep refreshing enabled storage plans until execution starts, even
+		// when StoragePlanned is already True: PVC inventory may have changed.
+		if condType == migrationv1alpha1.ConditionStoragePlanned &&
+			migration.Spec.MigrateStorage && migration.Status.StartTime == nil {
+			skipCondition = false
+		}
+		if skipCondition {
 			continue
 		}
 
-		handler, ok := handlers[condType]
+		conditionHandler, ok := handlers[condType]
 		if !ok {
 			return ctrl.Result{}, fmt.Errorf("no handler for condition %q", condType)
 		}
@@ -356,7 +369,21 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 			}
 			return ctrl.Result{}, err
 		}
-		result, err := handler(ctx, migration)
+		if r.blockUnsupportedStorageExecution(migration, condType) {
+			return ctrl.Result{RequeueAfter: planningResync}, r.updateStatus(ctx, migration, baseStatus)
+		}
+		// Persist the execution boundary only after current-generation planning passes.
+		if !isPlanningCondition(condType) && migration.Status.StartTime == nil {
+			now := metav1.Now()
+			migration.Status.StartTime = &now
+			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
+				return ctrl.Result{}, err
+			}
+			if r.Recorder != nil {
+				r.Recorder.Eventf(migration, nil, "Normal", "MigrationStarted", "MigrationStarted", "Migration workflow started")
+			}
+		}
+		result, err := conditionHandler(ctx, migration)
 		// Helpers may treat cleanup errors as best-effort; recheck before publishing success.
 		if permissionErr := execution.Check(ctx); permissionErr != nil {
 			err = permissionErr
@@ -370,7 +397,14 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 			r.Recorder.Eventf(migration, nil, "Warning", "ConditionFailed", "ConditionFailed", "Condition %s failed: %v", condType, err)
 		}
 
-		// Always persist status after processing a condition.
+		// Commit a successful plan together with the review or execution boundary.
+		// Persisting Ready=Planning here and PlanComplete below would cause
+		// unchanged inventory to trigger another reconcile through status events.
+		if err == nil && condType == migrationv1alpha1.ConditionStoragePlanned && isConditionComplete(migration, condType) {
+			continue
+		}
+
+		// Persist status before returning from a condition.
 		if statusErr := r.updateStatus(ctx, migration, baseStatus); statusErr != nil {
 			log.Error(statusErr, "failed to update status")
 			return ctrl.Result{}, statusErr
@@ -378,6 +412,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 
 		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if isPlanningCondition(condType) && result.IsZero() {
+			result.RequeueAfter = time.Millisecond
 		}
 		return result, nil
 	}
@@ -1541,21 +1578,27 @@ func (r *VmwareCloudFoundationMigrationReconciler) seedReadyCondition(migration 
 	}
 }
 
-// setCondition is a convenience wrapper around apimeta.SetStatusCondition.
-func (r *VmwareCloudFoundationMigrationReconciler) setCondition(migration *migrationv1alpha1.VmwareCloudFoundationMigration, conditionType string, status metav1.ConditionStatus, reason, message string) {
-	apimeta.SetStatusCondition(&migration.Status.Conditions, metav1.Condition{
+// setReadyRunning marks Ready as progressing and records an event when that
+// changes the condition.
+func (r *VmwareCloudFoundationMigrationReconciler) setReadyRunning(migration *migrationv1alpha1.VmwareCloudFoundationMigration) {
+	msg := "Migration is running"
+	changed := r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
+	if changed && r.Recorder != nil {
+		r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ReasonProgressing, migrationv1alpha1.ReasonProgressing, "%s", msg)
+	}
+}
+
+// setCondition is a convenience wrapper around apimeta.SetStatusCondition. It
+// reports whether the condition's status, reason, message, or observed
+// generation changed, so callers can emit an event only on a transition.
+func (r *VmwareCloudFoundationMigrationReconciler) setCondition(migration *migrationv1alpha1.VmwareCloudFoundationMigration, conditionType string, status metav1.ConditionStatus, reason, message string) bool {
+	return apimeta.SetStatusCondition(&migration.Status.Conditions, metav1.Condition{
 		Type:               conditionType,
 		Status:             status,
 		ObservedGeneration: migration.Generation,
 		Reason:             reason,
 		Message:            message,
 	})
-}
-
-// isConditionTrue checks whether the named condition has status True.
-func (r *VmwareCloudFoundationMigrationReconciler) isConditionTrue(migration *migrationv1alpha1.VmwareCloudFoundationMigration, conditionType string) bool {
-	cond := apimeta.FindStatusCondition(migration.Status.Conditions, conditionType)
-	return cond != nil && cond.Status == metav1.ConditionTrue
 }
 
 // statusConditionChanged reports whether two conditions of the same type
@@ -1580,10 +1623,9 @@ func statusConditionChanged(prev, next metav1.Condition) bool {
 // different condition in the meantime: conditions this reconcile did not touch
 // are left as the other writer set them. Merging is scoped to the object this
 // reconcile started from: a fetched copy with a different UID is a replacement
-// object that shares only name and namespace, so it receives nothing. As a
-// final guard, a committed True is never downgraded by a stale False or Unknown
-// from a reconcile that started before the success was recorded (it self-heals
-// on the next reconcile anyway, but this avoids a visible flap).
+// object that shares only name and namespace, so it receives nothing. Committed
+// success is protected from stale failures, while planning conditions can be
+// revalidated before execution.
 func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) error {
 	log := klog.FromContext(ctx)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -1613,8 +1655,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 				}
 			}
 		}
-		if migration.Status.StartTime != nil && latest.Status.StartTime == nil {
-			latest.Status.StartTime = migration.Status.StartTime
+		started, err := mergeStartTime(migration, latest)
+		if err != nil {
+			return err
+		}
+		if started {
 			hasChanges = true
 		}
 		ready := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
@@ -1625,15 +1670,20 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		if completed {
 			hasChanges = true
 		}
-		// The preflight-resolved mapping is recorded once and never
-		// overwritten, like the timestamps above. Only publish the mapping for
-		// the generation (and object identity) it was validated against: a spec
-		// edit or delete/recreate can land between this reconcile's fetch and
-		// the status write, and publishing a stale mapping would lock the newer
-		// valid spec out via ensureMappingImmutable.
-		if len(migration.Status.FailureDomainMappings) > 0 && len(latest.Status.FailureDomainMappings) == 0 &&
-			migration.Generation == latest.Generation && migration.UID == latest.UID {
-			latest.Status.FailureDomainMappings = migration.Status.FailureDomainMappings
+		// Only publish the mapping for the generation (and object identity) it
+		// was validated against: a spec edit or delete/recreate can land
+		// between this reconcile's fetch and the status write, and publishing a
+		// stale mapping would lock the newer valid spec out via
+		// ensureMappingImmutable.
+		resolved := migration.Status.FailureDomainMappings
+		sameObject := migration.Generation == latest.Generation && migration.UID == latest.UID
+		// Until the migration starts, preflight re-runs for each spec
+		// generation and its mapping replaces the recorded one. Afterwards the
+		// mapping is write-once, like the timestamps above.
+		firstRecord := len(latest.Status.FailureDomainMappings) == 0
+		replanned := latest.Status.StartTime == nil && !slices.Equal(resolved, latest.Status.FailureDomainMappings)
+		if len(resolved) > 0 && sameObject && (firstRecord || replanned) {
+			latest.Status.FailureDomainMappings = resolved
 			hasChanges = true
 		}
 		// Worker MachineSet names are append-only: merge this reconcile's
@@ -1671,6 +1721,24 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 	return nil
 }
 
+// mergeStartTime validates the execution boundary before recording the first start time.
+func mergeStartTime(migration, latest *migrationv1alpha1.VmwareCloudFoundationMigration) (bool, error) {
+	if migration.Status.StartTime == nil || latest.Status.StartTime != nil {
+		return false, nil
+	}
+	if migration.UID != latest.UID || !latest.DeletionTimestamp.IsZero() || migration.Generation != latest.Generation ||
+		latest.Spec.State != migrationv1alpha1.MigrationStateRunning || !reflect.DeepEqual(migration.Spec, latest.Spec) {
+		return false, fmt.Errorf("starting migration: spec or execution permission changed during planning; revalidating before disruption")
+	}
+	for _, condition := range []string{migrationv1alpha1.ConditionInfrastructurePrepared, migrationv1alpha1.ConditionStoragePlanned} {
+		if !isConditionComplete(latest, condition) {
+			return false, fmt.Errorf("starting migration: condition %s is not satisfied", condition)
+		}
+	}
+	latest.Status.StartTime = migration.Status.StartTime
+	return true, nil
+}
+
 // mergeCompletionRecord binds completion atomically to the spec that this
 // reconcile actually completed, recording CompletionTime only when latest has
 // not already recorded the same spec hash.
@@ -1691,7 +1759,8 @@ func mergeCompletionRecord(migration, latest *migrationv1alpha1.VmwareCloudFound
 	return false, nil
 }
 
-// mergeStatusConditions applies only changed, current-generation conditions without downgrading committed success.
+// mergeStatusConditions applies current-generation deltas, allowing planning
+// revalidation before execution while preserving concurrently committed success.
 func mergeStatusConditions(ctx context.Context, migration, latest *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) bool {
 	log := klog.FromContext(ctx)
 	hasChanges := false
@@ -1709,13 +1778,25 @@ func mergeStatusConditions(ctx context.Context, migration, latest *migrationv1al
 			log.V(1).Info("skipping stale generation condition update", "condition", cond.Type, "observedGeneration", cond.ObservedGeneration, "latestGeneration", latest.Generation)
 			continue
 		}
-		// Never downgrade a success another reconcile already committed.
-		if existing := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type); existing != nil &&
-			existing.Status == metav1.ConditionTrue && cond.Status != metav1.ConditionTrue {
+
+		existingCond := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type)
+
+		keepExistingSuccess := existingCond != nil &&
+			existingCond.Status == metav1.ConditionTrue && cond.Status != metav1.ConditionTrue
+
+		// Before execution, planning may discover blockers after an earlier success.
+		if keepExistingSuccess && latest.Status.StartTime == nil && isPlanningCondition(cond.Type) {
+			newerGeneration := cond.ObservedGeneration > existingCond.ObservedGeneration
+			canRefreshInventory := canRefreshPlan(latest, baseStatus, cond.Type, *existingCond)
+			if newerGeneration || canRefreshInventory {
+				keepExistingSuccess = false
+			}
+		}
+
+		if keepExistingSuccess {
 			log.V(1).Info("keeping committed condition success over stale update", "condition", cond.Type)
 			continue
 		}
-		existingCond := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type)
 		if existingCond == nil || statusConditionChanged(*existingCond, cond) {
 			hasChanges = true
 		}
@@ -1834,6 +1915,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateWorkloadProgress(
 func (r *VmwareCloudFoundationMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, _ client.Object) []reconcile.Request {
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{
+				Name: migrationv1alpha1.SingletonName, Namespace: migrationv1alpha1.SingletonNamespace,
+			}}}
+		}), builder.OnlyMetadata).
 		Named("vmwarecloudfoundationmigration").
 		WithOptions(controller.Options{
 			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](5*time.Second, 5*time.Minute),

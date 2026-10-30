@@ -61,6 +61,12 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
+    - description: StorageWorkloadMigration tracks customer-coordinated storage migration
+        in one namespace.
+      displayName: Storage Workload Migration
+      kind: StorageWorkloadMigration
+      name: storageworkloadmigrations.migration.openshift.io
+      version: v1alpha1
     - description: |-
         VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
         It orchestrates migration of an OpenShift cluster from one vCenter to another.
@@ -94,7 +100,15 @@ spec:
         - apiGroups:
           - ""
           resources:
+          - namespaces
+          verbs:
+          - get
+          - list
+        - apiGroups:
+          - ""
+          resources:
           - nodes
+          - persistentvolumeclaims
           - persistentvolumes
           verbs:
           - get
@@ -108,6 +122,14 @@ spec:
           verbs:
           - create
           - patch
+        - apiGroups:
+          - apps
+          resources:
+          - daemonsets
+          - replicasets
+          - statefulsets
+          verbs:
+          - get
         - apiGroups:
           - apps
           resources:
@@ -127,6 +149,13 @@ spec:
           - get
           - list
           - watch
+        - apiGroups:
+          - batch
+          resources:
+          - cronjobs
+          - jobs
+          verbs:
+          - get
         - apiGroups:
           - config.openshift.io
           resources:
@@ -192,6 +221,26 @@ spec:
         - apiGroups:
           - migration.openshift.io
           resources:
+          - storageworkloadmigrations
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - update
+          - watch
+        - apiGroups:
+          - migration.openshift.io
+          resources:
+          - storageworkloadmigrations/status
+          - vmwarecloudfoundationmigrations/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - migration.openshift.io
+          resources:
           - vmwarecloudfoundationmigrations
           verbs:
           - get
@@ -204,14 +253,6 @@ spec:
           resources:
           - vmwarecloudfoundationmigrations/finalizers
           verbs:
-          - update
-        - apiGroups:
-          - migration.openshift.io
-          resources:
-          - vmwarecloudfoundationmigrations/status
-          verbs:
-          - get
-          - patch
           - update
         - apiGroups:
           - networking.k8s.io
@@ -229,6 +270,13 @@ spec:
           - storages
           verbs:
           - get
+        - apiGroups:
+          - storage.k8s.io
+          resources:
+          - storageclasses
+          verbs:
+          - get
+          - list
         - apiGroups:
           - authentication.k8s.io
           resources:
