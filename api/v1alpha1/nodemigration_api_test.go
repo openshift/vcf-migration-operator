@@ -381,7 +381,7 @@ var _ = Describe("NodeMigration API validation", func() {
 				Name: "worker-1", State: NodeMigrationStateMigrating, RequestedMode: VMotionModeCold,
 				NodeUID: types.UID("node-uid-1"), ProviderID: "vsphere://420e5e2e-c9eb-4a76-9623-725885785001",
 				VMBIOSUUID: "420e5e2e-c9eb-4a76-9623-725885785001", OriginalSchedulingState: NodeMigrationSchedulingStateSchedulable,
-				TargetFailureDomain: "target-fd-1", TargetHost: "/TargetDC/host/esx-1",
+				TargetFailureDomain: "target-fd-1", TargetDatacenter: "TargetDC", TargetHost: "/TargetDC/host/esx-1",
 				TargetResourcePool: "/TargetDC/host/esx-1/Resources", TargetDatastore: "/TargetDC/datastore/TargetDS",
 				TargetNetwork: "VM Network",
 				ShutdownOutcome: &NodeMigrationOperationOutcome{
@@ -413,6 +413,7 @@ var _ = Describe("NodeMigration API validation", func() {
 
 		got := &VmwareCloudFoundationMigration{}
 		Expect(k8sClient.Get(ctx, clientKey(resource), got)).To(Succeed())
+		Expect(got.Status.NodeMigration.Workers.Nodes[0].TargetDatacenter).To(Equal("TargetDC"), "frozen datacenter must survive status round-trip")
 		invalidIdentifiers := []struct {
 			name  string
 			field string
@@ -481,6 +482,7 @@ var _ = Describe("NodeMigration API validation", func() {
 			{name: "progress VM BIOS UUID", field: "vmBIOSUUID"},
 			{name: "progress provider ID", field: "providerID"},
 			{name: "progress target failure domain", field: "targetFailureDomain"},
+			{name: "progress target datacenter", field: "targetDatacenter"},
 			{name: "progress target host", field: "targetHost"},
 			{name: "progress target resource pool", field: "targetResourcePool"},
 			{name: "progress target datastore", field: "targetDatastore"},

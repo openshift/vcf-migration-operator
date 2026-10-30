@@ -1185,6 +1185,13 @@ spec:
                               - Succeeded
                               - Failed
                               type: string
+                            targetDatacenter:
+                              description: |-
+                                targetDatacenter is the frozen destination datacenter. When set, it must
+                                be non-empty and at most 253 characters. VMotion claims require this field.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
                             targetDatastore:
                               description: |-
                                 targetDatastore is the frozen destination datastore path. When set, it must
@@ -1795,6 +1802,13 @@ spec:
                               - WaitingForNode
                               - Succeeded
                               - Failed
+                              type: string
+                            targetDatacenter:
+                              description: |-
+                                targetDatacenter is the frozen destination datacenter. When set, it must
+                                be non-empty and at most 253 characters. VMotion claims require this field.
+                              maxLength: 253
+                              minLength: 1
                               type: string
                             targetDatastore:
                               description: |-

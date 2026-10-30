@@ -901,6 +901,12 @@ type NodeMigrationProgress struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	TargetFailureDomain string `json:"targetFailureDomain,omitempty"`
+	// targetDatacenter is the frozen destination datacenter. When set, it must
+	// be non-empty and at most 253 characters. VMotion claims require this field.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	TargetDatacenter string `json:"targetDatacenter,omitempty"`
 	// targetHost is the frozen destination host identity, if selected. When set,
 	// it must be non-empty and at most 1024 characters.
 	// +kubebuilder:validation:MinLength=1

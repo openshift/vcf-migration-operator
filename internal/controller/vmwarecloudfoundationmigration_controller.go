@@ -75,6 +75,18 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	// checkNetworkingViaProbeVMsFunc overrides the probe-VM networking check in
 	// tests; nil selects the real implementation.
 	checkNetworkingViaProbeVMsFunc func(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, sourceVC *configv1.VSpherePlatformVCenterSpec) error
+	// vmotionInventoryFunc overrides the read-only source VM inventory lookup in tests.
+	vmotionInventoryFunc func(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, sourceFailureDomains []configv1.VSpherePlatformFailureDomainSpec, biosUUIDs []string) (vsphere.VMotionInventory, error)
+
+	// VMotionBackend permits only observation here; action submission belongs to
+	// the later admitted workflow and is not enabled by providing this adapter.
+	VMotionBackend vsphere.VMotionReadOnlyBackend
+	// VMotionRecoveryCheck must verify claimant quiescence, outcome/inactivity, VM/Node identity,
+	// location/power, applicable health and live plan/inventory without mutations.
+	// It must honor its bounded context, including after internal waits.
+	// Uncertain evidence is a nonterminal observation; errors mean read failures.
+	// Nil blocks recovery until the qualified orchestration supplies these checks.
+	VMotionRecoveryCheck func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration) (migrationv1alpha1.NodeMigrationObservationState, error)
 
 	// lastStallEventKey identifies the set of old worker machines described by the
 	// most recent OldWorkersStalled Warning event; lastStallEventTime is when that
@@ -234,6 +246,12 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
+	// Observe existing VMotion claims before pause/spec/deletion gates. Explicit
+	// deletion handoff must remain possible even when vCenter is unavailable.
+	if stop, result, err := r.reconcileVMotionAction(ctx, migration); stop || err != nil {
+		return result, err
+	}
+
 	// Deletion stops new actions only: nothing is cancelled, powered off,
 	// deleted, or rolled back. The record is retained behind the finalizer
 	// until the migration is complete or an administrator allows deletion.
@@ -242,8 +260,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		adminAllowed := migration.Annotations[migrationv1alpha1.AnnotationAllowDeletion] == "true"
-		if complete || adminAllowed {
+		adminAllowed := migration.Annotations[migrationv1alpha1.AnnotationAllowDeletion] == allowDeletionAnnotationValue
+		if (complete && !hasUnresolvedVMotionAction(migration)) || adminAllowed {
 			if err := r.updateRetentionFinalizer(ctx, migration); err != nil {
 				return ctrl.Result{}, fmt.Errorf("removing finalizer %s: %w", migrationv1alpha1.FinalizerName, err)
 			}
@@ -259,11 +277,16 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		if !alreadyRecorded {
 			message := fmt.Sprintf("deletion is blocked until the migration completes or an administrator sets the annotation %s=\"true\"", migrationv1alpha1.AnnotationAllowDeletion)
 			log.Info("retaining deleted migration record while work is outstanding")
-			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonDeletionBlocked, migrationv1alpha1.ReasonDeletionBlocked, "%s", message)
+			if r.Recorder != nil {
+				r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonDeletionBlocked, migrationv1alpha1.ReasonDeletionBlocked, "%s", message)
+			}
 			r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonDeletionBlocked, message)
 			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 				return ctrl.Result{}, err
 			}
+		}
+		if hasVMotionAction(migration) {
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		return ctrl.Result{}, nil
 	}
@@ -309,6 +332,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	if hasVMotionSelection(migration) {
+		return r.reconcileVMotionPlan(ctx, migration, baseStatus)
 	}
 
 	// Set start time on first reconcile in Running state.
@@ -1636,6 +1663,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			latest.Status.FailureDomainMappings = migration.Status.FailureDomainMappings
 			hasChanges = true
 		}
+		if mergeInitialNodeMigrationPlan(migration, latest, baseStatus) {
+			hasChanges = true
+		}
 		// Worker MachineSet names are append-only: merge this reconcile's
 		// newly recorded names into latest so they persist before cleanup can
 		// delete the source MachineSets they were derived from.
@@ -1669,6 +1699,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		return fmt.Errorf("updating migration status: %w", err)
 	}
 	return nil
+}
+
+// mergeInitialNodeMigrationPlan publishes the first frozen VMotion plan only
+// when no concurrent reconcile has already committed one.
+func mergeInitialNodeMigrationPlan(migration, latest *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) bool {
+	if migration.Status.NodeMigration == nil || baseStatus.NodeMigration != nil || latest.Status.NodeMigration != nil ||
+		migration.Generation != latest.Generation || migration.UID != latest.UID {
+		return false
+	}
+	latest.Status.NodeMigration = migration.Status.NodeMigration.DeepCopy()
+	return true
 }
 
 // mergeCompletionRecord binds completion atomically to the spec that this
