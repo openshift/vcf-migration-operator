@@ -8,21 +8,51 @@
 
 ## Spec
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `state` | `MigrationState` | No | `Pending` | `Pending`, `Running`, or `Paused`. Reconciler only acts when `Running`. |
-| `targetVCenterCredentialsSecret` | `SecretReference` | Yes | | Secret with target vCenter credentials. |
-| `failureDomains` | `[]VSpherePlatformFailureDomainSpec` | Yes (min 1) | | Target failure domains. Uses the OpenShift `configv1` type. |
-| `failureDomainMappings` | `[]FailureDomainMapping` | No | | Maps source failure domain names (from `Infrastructure`) to destination `failureDomains` entries. Required unless exactly one source and one destination failure domain exist; must cover every failure domain exactly once. |
-| `nodeMigration` | `NodeMigrationSpec` | No | | Selects Recreate or the VMotion API shape. When omitted, retains MachineSet/CPMS replacement. VMotion requires both roles, explicit matching Hot/Cold modes, and serial worker availability. API shape does not mean controller execution is implemented. See [Node Migration API](node-migration-api.md). |
+- `state` (`MigrationState`, optional, default `Pending`): accepts `Pending`, `Planning`, `Running`, or `Paused`. `Planning` runs only the non-disruptive checks; the full migration workflow executes only when `Running`.
+- `migrateStorage` (`bool`, optional, default `false`): migrate vSphere CSI volumes along with compute nodes. When `false`, vSphere CSI persistent volumes block the migration during preflight. Only storage planning is implemented; when `true`, `Running` stops with `Ready=False`, reason `StorageExecutionUnsupported`, before any disruptive condition.
+- `targetVCenterCredentialsSecret` (`SecretReference`, required): Secret with target vCenter credentials.
+- `failureDomains` (`[]VSpherePlatformFailureDomainSpec`, required, minimum one): target failure domains, using the OpenShift `configv1` type.
+- `failureDomainMappings` (`[]FailureDomainMapping`, optional): maps source failure domain names (from `Infrastructure`) to destination `failureDomains` entries. Required unless exactly one source and one destination failure domain exist; must cover every failure domain exactly once.
+- `nodeMigration` (`NodeMigrationSpec`, optional): selects Recreate or the VMotion API shape. When omitted, retains MachineSet/CPMS replacement. VMotion requires both roles, explicit matching Hot/Cold modes, and serial worker availability. API shape does not mean controller execution is implemented. See [Node Migration API](node-migration-api.md).
+- `storage` (`StorageMigrationSpec`, optional): configures CNS volume data migration. Can only be set when `migrateStorage` is `true`.
+
+### StorageMigrationSpec
+
+- `dataMigrationStrategy` (`VolumeDataMigrationStrategy`, optional, default `Auto`): how volume data is moved. Accepts `Auto` or `Rsync`; `CnsNative` is reserved and cannot currently be selected.
+- `storageClassMapping` (`[]StorageClassMapping`, optional): see [StorageClass Mapping](#storageclass-mapping).
+
+### StorageClass Mapping
+
+`spec.storage.storageClassMapping` optionally maps source StorageClass names to
+target StorageClass names for destination PVC provisioning. It is intended for
+in-tree vSphere source classes and classes pinned to source datastores. With no
+matching entry, the destination uses the source PVC's StorageClass.
+
+Each entry requires `source` and `target`, both valid StorageClass names of 1–253
+characters. Sources must be unique; multiple sources may share a target, and a
+source may map to itself. The target must be a suitable vSphere CSI StorageClass.
+Source PVCs and StorageClasses are not modified by the mapping.
+
+```yaml
+spec:
+  migrateStorage: true
+  storage:
+    storageClassMapping:
+      - source: legacy-vsphere
+        target: thin-csi
+      - source: datastore-pinned
+        target: thin-csi
+```
+
+The API accepts and persists this field. Planning and execution do not yet apply
+the mapping or validate target StorageClass existence and suitability.
 
 ### MigrationState Enum
 
-| Value | Meaning |
-|-------|---------|
-| `Pending` | Migration has not started |
-| `Running` | Migration is actively progressing |
-| `Paused` | Migration is paused by the user |
+- `Pending`: migration has not started.
+- `Planning`: the cluster administrator has requested migration planning. The reconciler runs only `InfrastructurePrepared` and `StoragePlanned`, then sets `Ready=False` with reason `PlanComplete` (or `PlanBlocked` when storage blockers exist) and re-checks periodically. Planning is rejected with `PlanningAfterStart` once the migration has started.
+- `Running`: migration is actively progressing.
+- `Paused`: migration is paused by the user.
 
 ### SecretReference
 
@@ -42,9 +72,12 @@ The secret must contain keys in the format `<vcenter-fqdn>.username` and `<vcent
 
 ### Failure Domain Mapping Behavior
 
-The effective mapping is resolved once at preflight and recorded in
-`status.failureDomainMappings`; every later phase uses the recorded value. After
-preflight, `spec.failureDomainMappings` is only checked for equivalence with the recorded
+The effective mapping is resolved at preflight and recorded in
+`status.failureDomainMappings`; every later phase uses the recorded value. Until the
+migration starts (`status.startTime` is unset, i.e. during `Pending` or `Planning`), the
+mapping stays editable: preflight re-runs for each spec generation and replaces the
+recorded mapping with the newly resolved one. Once the migration has started,
+`spec.failureDomainMappings` is only checked for equivalence with the recorded
 mapping: reordering the same source→destination pairs is accepted (the comparison ignores
 order), and clearing the field is tolerated (the recorded mapping keeps driving every
 later phase, and an empty recorded list short-circuits the check too). Changing an
@@ -136,9 +169,9 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 | Field | Type | Description |
 |-------|------|-------------|
 | `conditions` | `[]metav1.Condition` | Ordered migration phase conditions |
-| `failureDomainMappings` | `[]FailureDomainMapping` | Effective source-to-destination failure domain mapping, recorded once at preflight and immutable afterwards; it drives every later phase |
+| `failureDomainMappings` | `[]FailureDomainMapping` | Effective source-to-destination failure domain mapping, resolved at preflight and replaced by each preflight run until `startTime` is set, then write-once; it drives every later phase |
 | `workerMachineSetNames` | `[]string` | Append-only inventory of destination worker MachineSet names (max 256), used to require the replacements after the source MachineSets are deleted |
-| `startTime` | `*metav1.Time` | When migration entered `Running` |
+| `startTime` | `*metav1.Time` | When the first disruptive condition started, after planning passed in `Running` |
 | `completionTime` | `*metav1.Time` | When migration reached `Ready` |
 | `nodeMigration` | `NodeMigrationStatus` | Per-node move progress. Nil when using MachineSet/CPMS replacement. |
 
@@ -148,6 +181,7 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 |------|-------------|
 | `Accepted` | Admission gate: `True` for the singleton instance (`openshift-vcf-migration/cluster`), `False` for unsupported object names or namespaces, and `False` with `DeletionBlocked` while deletion is retained |
 | `InfrastructurePrepared` | Preflight checks passed, migration path validated |
+| `StoragePlanned` | Storage inventory and target resolution have no blockers; `True` with reason `NotConfigured` when `migrateStorage` is `false` |
 | `DestinationInitialized` | Target vCenter folders and topology tags created |
 | `MultiSiteConfigured` | Cluster recognizes both vCenters |
 | `WorkloadMigrated` | Workers created on target, control plane rolled out, source scaled to 0 |
@@ -156,7 +190,7 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 
 ### Condition Reasons
 
-`Progressing`, `Completed`, `Failed`, `Paused`, `UnsupportedName`, `UnsupportedNamespace`, `DeletionBlocked`, `MappingRejected`
+`Progressing`, `Completed`, `Failed`, `Paused`, `UnsupportedName`, `UnsupportedNamespace`, `DeletionBlocked`, `MappingRejected`, `Planning`, `PlanComplete`, `PlanBlocked`, `PlanningAfterStart`, `NotConfigured`
 
 `Paused` is applied to the `Ready` condition while `spec.state` is `Paused` (message explains how to resume); it is cleared and replaced with `Progressing` when the migration is resumed.
 
