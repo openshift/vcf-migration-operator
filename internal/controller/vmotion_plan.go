@@ -248,6 +248,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) freezeVMotionPlan(ctx context
 	if err := validateVMotionNodeRoles(latestNodes.Items); err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
 	}
+	initialIdentities := identities
 	identities, err = collectVMotionNodeIdentities(latestNodes.Items)
 	if err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
@@ -258,6 +259,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) freezeVMotionPlan(ctx context
 	}
 	if err := machineAPI.validate(identities); err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
+	}
+	if !sameVMotionNodeIdentities(initialIdentities, identities) {
+		return r.retryVMotionPlan(ctx, migration, baseStatus, fmt.Errorf("checking VMotion inventory: Node identities changed during inventory; retrying with fresh observations"))
 	}
 	if err := validateVMotionSourceFailureDomainReferences(sourceFDs, inventory.SourceFailureDomainReferences, sourceVC.Server, sourceVC.Datacenters[0]); err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
@@ -275,6 +279,20 @@ func (r *VmwareCloudFoundationMigrationReconciler) freezeVMotionPlan(ctx context
 
 	migration.Status.NodeMigration = candidate
 	return r.progressVMotionPlan(ctx, migration, baseStatus)
+}
+
+// Both inputs are sorted by role and name by collectVMotionNodeIdentities.
+func sameVMotionNodeIdentities(a, b []vmotionNodeIdentity) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].node.Name != b[i].node.Name || a[i].node.UID != b[i].node.UID ||
+			a[i].node.Spec.ProviderID != b[i].node.Spec.ProviderID || a[i].role != b[i].role || a[i].biosUUID != b[i].biosUUID {
+			return false
+		}
+	}
+	return true
 }
 
 type vmotionNodeIdentity struct {
