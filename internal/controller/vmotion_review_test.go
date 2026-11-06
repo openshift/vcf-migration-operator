@@ -9,6 +9,7 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
@@ -83,6 +84,68 @@ func TestVMotionInventoryRetriesNodeIdentityDrift(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestVMotionPlanningInitializesLifecycleStatus(t *testing.T) {
+	for _, blocked := range []bool{false, true} {
+		t.Run(map[bool]string{false: "eligible", true: "blocked"}[blocked], func(t *testing.T) {
+			h := newVMotionPlanHarness(t)
+			if blocked {
+				if err := h.kubeClient.CoreV1().Nodes().Delete(context.Background(), "control-plane-a", metav1.DeleteOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.migration.Spec.State = migrationv1alpha1.MigrationStatePaused
+			if err := h.apiClient.Update(context.Background(), h.migration); err != nil {
+				t.Fatal(err)
+			}
+			h.reconcile(t)
+			if h.migration.Status.StartTime != nil {
+				t.Fatal("paused migration started clock")
+			}
+			h.migration.Spec.State = migrationv1alpha1.MigrationStateRunning
+			if err := h.apiClient.Update(context.Background(), h.migration); err != nil {
+				t.Fatal(err)
+			}
+			h.reconcile(t)
+			if h.migration.Status.StartTime == nil {
+				t.Fatal("planning did not set StartTime")
+			}
+			start := h.migration.Status.StartTime.DeepCopy()
+			ready := apimeta.FindStatusCondition(h.migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+			if ready == nil || ready.Status != metav1.ConditionFalse {
+				t.Fatalf("Ready = %+v, want False", ready)
+			}
+			h.reconcile(t)
+			for _, state := range []migrationv1alpha1.MigrationState{migrationv1alpha1.MigrationStatePaused, migrationv1alpha1.MigrationStateRunning} {
+				h.migration.Spec.State = state
+				if err := h.apiClient.Update(context.Background(), h.migration); err != nil {
+					t.Fatal(err)
+				}
+				h.reconcile(t)
+				if !start.Equal(h.migration.Status.StartTime) {
+					t.Fatal("reconcile changed StartTime")
+				}
+			}
+			startedEvents := 0
+			recorded := h.reconciler.Recorder.(*events.FakeRecorder).Events
+			for len(recorded) > 0 {
+				if strings.Contains(<-recorded, "MigrationStarted") {
+					startedEvents++
+				}
+			}
+			if startedEvents != 1 {
+				t.Fatalf("MigrationStarted events = %d, want 1", startedEvents)
+			}
+		})
+	}
+	// A fresh Running CR must seed Ready without relying on pause/resume.
+	h := newVMotionPlanHarness(t)
+	h.reconcile(t)
+	ready := apimeta.FindStatusCondition(h.migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || h.migration.Status.StartTime == nil {
+		t.Fatalf("initial lifecycle = %+v", h.migration.Status)
 	}
 }
 

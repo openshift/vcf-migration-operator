@@ -313,18 +313,22 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 		}
 	}
 
-	if hasVMotionSelection(migration) {
-		return r.reconcileVMotionPlan(ctx, migration, baseStatus)
-	}
+	r.seedReadyCondition(migration)
 
 	// Set start time on first reconcile in Running state.
 	if migration.Status.StartTime == nil {
 		now := metav1.Now()
 		migration.Status.StartTime = &now
-		r.Recorder.Eventf(migration, nil, "Normal", "MigrationStarted", "MigrationStarted", "Migration workflow started")
+		if r.Recorder != nil {
+			r.Recorder.Eventf(migration, nil, "Normal", "MigrationStarted", "MigrationStarted", "Migration workflow started")
+		}
 		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	if hasVMotionSelection(migration) {
+		return r.reconcileVMotionPlan(ctx, migration, baseStatus)
 	}
 
 	// Walk conditions in order; execute work for the first non-True condition.
@@ -342,7 +346,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 		return ctrl.Result{}, err
 	}
 
-	r.seedReadyCondition(migration)
 	ctx = r.executionContext(ctx, migration)
 
 	for _, condType := range conditionOrder {
