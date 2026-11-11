@@ -1,59 +1,119 @@
-#!/bin/bash
-
+#!/usr/bin/env bash
+#
+# Maintain the OLM upgrade graph in the FBC catalogs: add the channel entry for
+# <version> and point its `replaces` at the newest entry already in the channel.
+#
+# The bundle itself must already be in catalog.yaml (see hack/build-catalog.sh);
+# this script only maintains the olm.channel document's entries list.
 set -euo pipefail
 
-INPUT_VERSION="$1"
+PACKAGE="vcf-migration-operator"
+CHANNEL="dev-preview"
 
-# Ensure version starts with "v"
-if [[ "$INPUT_VERSION" != v* ]]; then
-  VERSION="v$INPUT_VERSION"
-else
-  VERSION="$INPUT_VERSION"
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 <version>    # e.g. $0 0.1.1 or $0 v0.1.1" >&2
+    exit 2
 fi
 
-ENTRY_NAME="multiarch-tuning-operator.$VERSION"
+INPUT_VERSION="$1"
+NEW_ENTRY="${PACKAGE}.v${INPUT_VERSION#v}"
 
-for dir in fbc-*; do
-  YAML_PATH="$dir/catalog/multiarch-tuning-operator/index.yaml"
+# Print the version part of a bundle name: vcf-migration-operator.v0.1.1 -> 0.1.1
+strip_version() {
+    sed -E "s/^${PACKAGE}\.v?//"
+}
 
-  if [[ ! -f "$YAML_PATH" ]]; then
-    echo "Skipping $dir (no index.yaml found)"
-    continue
-  fi
+# Version-compare two dotted versions; exits 0 when $1 > $2.
+version_gt() {
+    local IFS='.'
+    # shellcheck disable=SC2206  # intentional word splitting on '.'
+    local -a a=($1) b=($2)
+    local i
+    for i in 0 1 2 3; do
+        local x="${a[$i]:-0}" y="${b[$i]:-0}"
+        if ((10#$x > 10#$y)); then return 0; fi
+        if ((10#$x < 10#$y)); then return 1; fi
+    done
+    return 1
+}
 
-  echo "Processing $YAML_PATH"
+# Highest semver among the channel entries of one catalog.
+latest_channel_entry() {
+    local catalog="$1" entry version latest="" latest_version=""
+    while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        version="$(printf '%s' "$entry" | strip_version)"
+        if [[ -z "$latest" ]] || version_gt "$version" "$latest_version"; then
+            latest="$entry"
+            latest_version="$version"
+        fi
+    done < <(awk '
+        /^schema: olm\.channel$/ { in_doc = 1; next }
+        in_doc && /^schema:/ { in_doc = 0 }
+        in_doc && /^entries:/ { in_entries = 1; next }
+        in_doc && in_entries && /^  - name: / { sub(/^  - name: /, ""); print }
+        in_doc && in_entries && /^[^ ]/ { in_entries = 0 }
+    ' "$catalog")
+    printf '%s' "$latest"
+}
 
-  # Extract first existing entry
-  PREVIOUS_ENTRY=$(awk '
-    $1 == "entries:" { in_entries=1; next }
-    in_entries && $1 == "-name:" { print $2; exit }
-    in_entries && $1 == "-" && $2 == "name:" { print $3; exit }
-  ' "$YAML_PATH")
+found_catalog=false
+for dir in fbc-v*-*; do
+    [[ -d "$dir" ]] || continue
+    catalog="$dir/catalog/${PACKAGE}/catalog.yaml"
+    if [[ ! -f "$catalog" ]]; then
+        echo "Skipping $dir (no $catalog)"
+        continue
+    fi
+    found_catalog=true
+    echo "Processing $catalog"
 
-  if [[ -z "$PREVIOUS_ENTRY" ]]; then
-    echo "Error: No previous entry found in $YAML_PATH"
-    continue
-  fi
+    if ! grep -qx "^schema: olm.channel$" "$catalog"; then
+        echo "Error: $catalog has no olm.channel document; not inventing one" >&2
+        exit 1
+    fi
 
-  # Prepare new entry block
-  NEW_ENTRY="  - name: $ENTRY_NAME\n    replaces: $PREVIOUS_ENTRY"
+    # The bundle must already be in the catalog, otherwise the channel would
+    # point at a bundle that does not exist.
+    if ! grep -qx "name: ${NEW_ENTRY}" "$catalog"; then
+        echo "Error: ${NEW_ENTRY} is not in $catalog; add the bundle first" >&2
+        echo "       (make build-index SNAPSHOT=<snapshot-or-bundle-image>)" >&2
+        exit 1
+    fi
 
-  # Insert the new entry after 'entries:' without adding newline at end
-  awk -v new_entry="$NEW_ENTRY" '
-    BEGIN { added=0 }
-    {
-      if (!added && $1 == "entries:") {
-        print $0
-        print new_entry
-        added=1
-      } else {
-        print $0
-      }
-    }
-    END { if (added == 0) exit 1 }
-  ' "$YAML_PATH" | awk 'NR == 1 { printf "%s", $0; next } { printf "\n%s", $0 }' > "$YAML_PATH.tmp" && mv "$YAML_PATH.tmp" "$YAML_PATH"
+    if awk -v entry="  - name: ${NEW_ENTRY}" '$0 == entry { found = 1 } END { exit !found }' "$catalog"; then
+        echo "  ${NEW_ENTRY} is already in channel ${CHANNEL}; nothing to do"
+        continue
+    fi
 
-  echo "Updated $YAML_PATH with new entry: $ENTRY_NAME replaces $PREVIOUS_ENTRY"
+    previous="$(latest_channel_entry "$catalog")"
+    if [[ -z "$previous" ]]; then
+        echo "Error: channel ${CHANNEL} in $catalog has no entries to replace" >&2
+        exit 1
+    fi
+
+    echo "  ${NEW_ENTRY} replaces ${previous}"
+    tmp="$(mktemp)"
+    awk -v entry="${NEW_ENTRY}" -v replaces="${previous}" '
+        /^schema: olm\.channel$/ { in_doc = 1 }
+        in_doc && /^entries:/ {
+            print
+            print "  - name: " entry
+            print "    replaces: " replaces
+            inserted = 1
+            in_entries = 1
+            next
+        }
+        { print }
+        END { if (!inserted) exit 1 }
+    ' "$catalog" > "$tmp"
+    chmod --reference="$catalog" "$tmp" 2>/dev/null || chmod "$(stat -f '%Lp' "$catalog")" "$tmp"
+    mv "$tmp" "$catalog"
 done
+
+if [[ "$found_catalog" != true ]]; then
+    echo "Error: no catalog.yaml files found under fbc-v* directories" >&2
+    exit 1
+fi
 
 echo "Done."
