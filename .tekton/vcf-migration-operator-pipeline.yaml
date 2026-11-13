@@ -4,7 +4,7 @@ metadata:
   name: vcf-migration-operator-pipeline
 spec:
   description: |
-    Pipeline for building the VCF Migration Operator container image.
+    Pipeline for building the VCF Migration Operator multi-platform container image.
 
     _Uses `buildah` to create a container image leveraging [trusted artifacts](https://konflux-ci.dev/architecture/ADR/0036-trusted-artifacts.html). It also creates a source image and runs build-time tests._
   params:
@@ -26,6 +26,12 @@ spec:
     description: Path to the Dockerfile inside the context specified by parameter path-context
     name: dockerfile
     type: string
+  - default:
+    - linux/x86_64
+    - linux/arm64
+    description: Platforms provided by the Konflux multi-platform controller.
+    name: build-platforms
+    type: array
   - default: "false"
     description: Skip checks against built image
     name: skip-checks
@@ -168,7 +174,14 @@ spec:
     - name: netrc
       workspace: netrc
   - name: build-container
+    matrix:
+      params:
+      - name: PLATFORM
+        value:
+        - $(params.build-platforms)
     params:
+    - name: IMAGE_APPEND_PLATFORM
+      value: "true"
     - name: IMAGE
       value: $(params.output-image)
     - name: DOCKERFILE
@@ -213,9 +226,9 @@ spec:
     taskRef:
       params:
       - name: name
-        value: buildah-oci-ta
+        value: buildah-remote-oci-ta
       - name: bundle
-        value: quay.io/konflux-ci/tekton-catalog/task-buildah-oci-ta:0.12.1@sha256:9eef3bf4c8a6a28605c713d56048fef5349bc4c791f289d8b95396ab039eda6b
+        value: quay.io/konflux-ci/tekton-catalog/task-buildah-remote-oci-ta:0.12.1@sha256:f34d44fd81608a76644b3af2784ee9d3ffb7eae57e33242b0b1ef1aeca57c9ac
       - name: kind
         value: task
       resolver: bundles
@@ -227,7 +240,7 @@ spec:
       value: $(params.build-image-index)
     - name: IMAGES
       value:
-      - $(tasks.build-container.results.IMAGE_URL)@$(tasks.build-container.results.IMAGE_DIGEST)
+      - $(tasks.build-container.results.IMAGE_REF[*])
     - name: BUILDAH_FORMAT
       value: $(params.buildah-format)
     runAfter:
@@ -312,6 +325,11 @@ spec:
       values:
       - "false"
   - name: ecosystem-cert-preflight-checks
+    matrix:
+      params:
+      - name: platform
+        value:
+        - $(params.build-platforms)
     params:
     - name: image-url
       value: $(tasks.build-image-index.results.IMAGE_URL)
@@ -360,6 +378,11 @@ spec:
       values:
       - "false"
   - name: clamav-scan
+    matrix:
+      params:
+      - name: image-arch
+        value:
+        - $(params.build-platforms)
     params:
     - name: image-digest
       value: $(tasks.build-image-index.results.IMAGE_DIGEST)
