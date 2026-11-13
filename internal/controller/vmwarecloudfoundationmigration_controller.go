@@ -76,7 +76,8 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	// tests; nil selects the real implementation.
 	checkNetworkingViaProbeVMsFunc func(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, sourceVC *configv1.VSpherePlatformVCenterSpec) error
 	// vmotionInventoryFunc overrides the read-only source VM inventory lookup in tests.
-	vmotionInventoryFunc func(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, sourceFailureDomains []configv1.VSpherePlatformFailureDomainSpec, biosUUIDs []string) (vsphere.VMotionInventory, error)
+	// liveServer is the Infrastructure spelling used for credential lookup.
+	vmotionInventoryFunc func(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, liveServer string, sourceFailureDomains []configv1.VSpherePlatformFailureDomainSpec, biosUUIDs []string) (vsphere.VMotionInventory, error)
 
 	// lastStallEventKey identifies the set of old worker machines described by the
 	// most recent OldWorkersStalled Warning event; lastStallEventTime is when that
@@ -2024,7 +2025,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkMappingForReconcile(ctx 
 		// Event fires once per drift, not on every reconcile while drifted.
 		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
 		alreadyRecorded := isMappingRejection(cond) && cond.ObservedGeneration == migration.Generation
-		if !alreadyRecorded {
+		if !alreadyRecorded && r.Recorder != nil {
 			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonMappingRejected, migrationv1alpha1.ReasonMappingRejected, "%s", err)
 		}
 		r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonMappingRejected, err.Error())

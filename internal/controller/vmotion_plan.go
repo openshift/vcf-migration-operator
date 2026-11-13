@@ -29,6 +29,11 @@ const (
 	vmotionWorkerRole        = "worker"
 	vmotionControlPlaneRole  = "control-plane"
 	vmotionMachineAnnotation = "machine.openshift.io/machine"
+
+	vmotionPlanFrozenMessage = "VMotion plan frozen; VM actions remain disabled pending the remaining safety stages"
+	// vmotionPlanSteadyStateRequeue spaces out post-freeze drift checks: each one
+	// repeats a full vCenter login and datacenter inventory.
+	vmotionPlanSteadyStateRequeue = 5 * time.Minute
 )
 
 func hasVMotionSelection(migration *migrationv1alpha1.VmwareCloudFoundationMigration) bool {
@@ -115,6 +120,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileVMotionPlan(ctx cont
 	nodes, err := r.KubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return r.retryVMotionPlan(ctx, migration, baseStatus, fmt.Errorf("listing nodes for VMotion planning: %w", err))
+	}
+	if err := validateNoTerminatingVMotionNodes(nodes.Items); err != nil {
+		return r.retryVMotionPlan(ctx, migration, baseStatus, err)
 	}
 	if err := validateVMotionNodeRoles(nodes.Items); err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
@@ -245,13 +253,19 @@ func (r *VmwareCloudFoundationMigrationReconciler) freezeVMotionPlan(ctx context
 	if err != nil {
 		return r.retryVMotionPlan(ctx, migration, baseStatus, fmt.Errorf("relisting Nodes after VMotion inventory: %w", err))
 	}
+	// Post-inventory observations are compared, never trusted outright: a Node
+	// added, removed, relabelled or deleted during inventory is drift, and the
+	// next reconcile sees a settled set.
+	if err := validateNoTerminatingVMotionNodes(latestNodes.Items); err != nil {
+		return r.retryVMotionPlan(ctx, migration, baseStatus, err)
+	}
 	if err := validateVMotionNodeRoles(latestNodes.Items); err != nil {
-		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
+		return r.retryVMotionPlan(ctx, migration, baseStatus, err)
 	}
 	initialIdentities := identities
 	identities, err = collectVMotionNodeIdentities(latestNodes.Items)
 	if err != nil {
-		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
+		return r.retryVMotionPlan(ctx, migration, baseStatus, err)
 	}
 	machineAPI, err = r.readVMotionMachineAPI(ctx)
 	if err != nil {
@@ -274,11 +288,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) freezeVMotionPlan(ctx context
 		if err := validateVMotionPlanStability(migration.Status.NodeMigration, candidate); err != nil {
 			return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
 		}
-		return r.progressVMotionPlan(ctx, migration, baseStatus)
+		return r.progressVMotionPlan(ctx, migration, baseStatus, vmotionPlanSteadyStateRequeue)
 	}
 
 	migration.Status.NodeMigration = candidate
-	return r.progressVMotionPlan(ctx, migration, baseStatus)
+	return r.progressVMotionPlan(ctx, migration, baseStatus, 30*time.Second)
 }
 
 // Both inputs are sorted by role and name by collectVMotionNodeIdentities.
@@ -517,7 +531,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) listVMotionVMInventory(ctx co
 		})
 	}
 	if r.vmotionInventoryFunc != nil {
-		return r.vmotionInventoryFunc(vsphereCtx, sourceVC, sourceFDs, biosUUIDs)
+		return r.vmotionInventoryFunc(vsphereCtx, sourceVC, liveServer, sourceFDs, biosUUIDs)
 	}
 	username, password, err := openshift.NewSecretManager(r.KubeClient).GetCredentials(vsphereCtx, liveServer)
 	if err != nil {
@@ -560,7 +574,7 @@ func buildVMotionPlan(migration *migrationv1alpha1.VmwareCloudFoundationMigratio
 		},
 		ControlPlane: &migrationv1alpha1.RoleMigrationStatus{RequestedMode: mode},
 		Workers:      &migrationv1alpha1.RoleMigrationStatus{RequestedMode: mode},
-		Progress:     "VMotion plan frozen; VM actions remain disabled pending the remaining safety stages",
+		Progress:     vmotionPlanFrozenMessage,
 	}
 	fingerprintNodes := make([]vmotionFingerprintNode, 0, len(identities))
 	for i := range identities {
@@ -590,11 +604,11 @@ func buildVMotionPlan(migration *migrationv1alpha1.VmwareCloudFoundationMigratio
 		if err != nil {
 			return nil, err
 		}
-		if destinationFD.Server != destinationServer || destinationFD.Topology.Datacenter == "" ||
-			destinationFD.Topology.ComputeCluster == "" || destinationFD.Topology.ResourcePool == "" ||
-			destinationFD.Topology.Datastore == "" || len(destinationFD.Topology.Networks) != 1 || destinationFD.Topology.Networks[0] == "" {
-			return nil, fmt.Errorf("destination failure domain %q must specify one server, datacenter, compute cluster, resource pool, datastore, and network for VMotion", destinationFD.Name)
+		if err := validateVMotionDestinationFailureDomain(destinationFD, destinationServer); err != nil {
+			return nil, err
 		}
+		// An empty topology.resourcePool means the compute cluster's root pool.
+		resourcePool := openshift.EffectiveResourcePool(*destinationFD)
 		schedulingState := migrationv1alpha1.NodeMigrationSchedulingStateSchedulable
 		if identity.node.Spec.Unschedulable {
 			schedulingState = migrationv1alpha1.NodeMigrationSchedulingStateUnschedulable
@@ -604,7 +618,7 @@ func buildVMotionPlan(migration *migrationv1alpha1.VmwareCloudFoundationMigratio
 			Name: identity.node.Name, State: migrationv1alpha1.NodeMigrationStatePending, RequestedMode: mode,
 			VMBIOSUUID: biosUUID, NodeUID: identity.node.UID, ProviderID: identity.node.Spec.ProviderID,
 			OriginalSchedulingState: schedulingState, TargetFailureDomain: destinationFD.Name,
-			TargetResourcePool: destinationFD.Topology.ResourcePool, TargetDatastore: destinationFD.Topology.Datastore,
+			TargetResourcePool: resourcePool, TargetDatastore: destinationFD.Topology.Datastore,
 			TargetNetwork: destinationFD.Topology.Networks[0], SourceInventoryPath: vm.InventoryPath,
 		}
 		if identity.role == vmotionControlPlaneRole {
@@ -618,7 +632,7 @@ func buildVMotionPlan(migration *migrationv1alpha1.VmwareCloudFoundationMigratio
 			ResourcePoolOwner:  vm.ResourcePoolOwner,
 			OriginalScheduling: schedulingState, TargetFailureDomain: destinationFD.Name,
 			TargetDatacenter: destinationFD.Topology.Datacenter, TargetComputeResource: destinationFD.Topology.ComputeCluster,
-			TargetResourcePool: destinationFD.Topology.ResourcePool, TargetDatastore: destinationFD.Topology.Datastore,
+			TargetResourcePool: resourcePool, TargetDatastore: destinationFD.Topology.Datastore,
 			TargetNetwork: destinationFD.Topology.Networks[0],
 		})
 	}
@@ -698,32 +712,88 @@ func vmotionPlanFingerprint(uid types.UID, frozen migrationv1alpha1.NodeMigratio
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// validateVMotionPlanStability reports every observed difference so the operator
+// can see what drifted; a frozen plan is never republished.
 func validateVMotionPlanStability(existing, candidate *migrationv1alpha1.NodeMigrationStatus) error {
-	if existing.Type != migrationv1alpha1.NodeMigrationTypeVMotion || existing.MigrationUID != candidate.MigrationUID ||
-		existing.ExecutionID == "" || existing.FrozenPlan == nil || *existing.FrozenPlan != *candidate.FrozenPlan ||
-		existing.PlanFingerprint == "" || existing.PlanFingerprint != candidate.PlanFingerprint {
-		return fmt.Errorf("frozen VMotion plan changed or has invalid identity; resolve the drift before retrying")
+	drifted := vmotionFieldDrift([][3]string{
+		{"engine type", string(existing.Type), string(candidate.Type)},
+		{"migration UID", string(existing.MigrationUID), string(candidate.MigrationUID)},
+	})
+	if existing.ExecutionID == "" {
+		drifted = append(drifted, "execution ID is missing")
 	}
-	if !sameFrozenNodeList(existing.ControlPlane, candidate.ControlPlane) || !sameFrozenNodeList(existing.Workers, candidate.Workers) {
-		return fmt.Errorf("frozen VMotion per-Node identities or placement changed; resolve the drift before retrying")
+	if existing.FrozenPlan == nil {
+		drifted = append(drifted, "frozen plan is missing")
+	} else {
+		drifted = append(drifted, vmotionFieldDrift([][3]string{
+			{"source vCenter", existing.FrozenPlan.SourceVCenter, candidate.FrozenPlan.SourceVCenter},
+			{"source datacenter", existing.FrozenPlan.SourceDatacenter, candidate.FrozenPlan.SourceDatacenter},
+			{"destination vCenter", existing.FrozenPlan.DestinationVCenter, candidate.FrozenPlan.DestinationVCenter},
+			{"mode", string(existing.FrozenPlan.Mode), string(candidate.FrozenPlan.Mode)},
+		})...)
 	}
-	return nil
+	if existing.PlanFingerprint != candidate.PlanFingerprint {
+		drifted = append(drifted, "plan fingerprint")
+	}
+	drifted = append(drifted, frozenNodeDrift(vmotionControlPlaneRole, existing.ControlPlane, candidate.ControlPlane)...)
+	drifted = append(drifted, frozenNodeDrift(vmotionWorkerRole, existing.Workers, candidate.Workers)...)
+	if len(drifted) == 0 {
+		return nil
+	}
+	return fmt.Errorf("frozen VMotion plan drifted (%s); the plan is immutable, so delete and recreate the migration resource to plan again", strings.Join(drifted, "; "))
 }
 
-func sameFrozenNodeList(existing, candidate *migrationv1alpha1.RoleMigrationStatus) bool {
-	if existing == nil || candidate == nil || len(existing.Nodes) != len(candidate.Nodes) {
-		return false
-	}
-	for i := range existing.Nodes {
-		a, b := &existing.Nodes[i], &candidate.Nodes[i]
-		if a.Name != b.Name || a.NodeUID != b.NodeUID || a.ProviderID != b.ProviderID || a.VMBIOSUUID != b.VMBIOSUUID ||
-			a.RequestedMode != b.RequestedMode || a.OriginalSchedulingState != b.OriginalSchedulingState ||
-			a.TargetFailureDomain != b.TargetFailureDomain || a.TargetResourcePool != b.TargetResourcePool ||
-			a.TargetDatastore != b.TargetDatastore || a.TargetNetwork != b.TargetNetwork || a.SourceInventoryPath != b.SourceInventoryPath {
-			return false
+func vmotionFieldDrift(fields [][3]string) []string {
+	var drifted []string
+	for _, field := range fields {
+		if field[1] != field[2] {
+			drifted = append(drifted, fmt.Sprintf("%s changed from %q to %q", field[0], field[1], field[2]))
 		}
 	}
-	return true
+	return drifted
+}
+
+func frozenNodeDrift(role string, existing, candidate *migrationv1alpha1.RoleMigrationStatus) []string {
+	byName := func(list *migrationv1alpha1.RoleMigrationStatus) map[string]*migrationv1alpha1.NodeMigrationProgress {
+		nodes := map[string]*migrationv1alpha1.NodeMigrationProgress{}
+		if list == nil {
+			return nodes
+		}
+		for i := range list.Nodes {
+			nodes[list.Nodes[i].Name] = &list.Nodes[i]
+		}
+		return nodes
+	}
+	frozen, fresh := byName(existing), byName(candidate)
+	var drifted []string
+	for name := range frozen {
+		if _, ok := fresh[name]; !ok {
+			drifted = append(drifted, fmt.Sprintf("%s Node %q was removed", role, name))
+		}
+	}
+	for name, node := range fresh {
+		previous, ok := frozen[name]
+		if !ok {
+			drifted = append(drifted, fmt.Sprintf("%s Node %q was added", role, name))
+			continue
+		}
+		for _, field := range vmotionFieldDrift([][3]string{
+			{"node UID", string(previous.NodeUID), string(node.NodeUID)},
+			{"providerID", previous.ProviderID, node.ProviderID},
+			{"VM BIOS UUID", previous.VMBIOSUUID, node.VMBIOSUUID},
+			{"requested mode", string(previous.RequestedMode), string(node.RequestedMode)},
+			{"original scheduling state", string(previous.OriginalSchedulingState), string(node.OriginalSchedulingState)},
+			{"target failure domain", previous.TargetFailureDomain, node.TargetFailureDomain},
+			{"target resource pool", previous.TargetResourcePool, node.TargetResourcePool},
+			{"target datastore", previous.TargetDatastore, node.TargetDatastore},
+			{"target network", previous.TargetNetwork, node.TargetNetwork},
+			{"source inventory path", previous.SourceInventoryPath, node.SourceInventoryPath},
+		}) {
+			drifted = append(drifted, fmt.Sprintf("%s Node %q %s", role, name, field))
+		}
+	}
+	sort.Strings(drifted)
+	return drifted
 }
 
 func (r *VmwareCloudFoundationMigrationReconciler) retryVMotionPlan(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus, err error) (ctrl.Result, error) {
@@ -742,8 +812,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) retryVMotionPlan(ctx context.
 	return ctrl.Result{}, err
 }
 
-func (r *VmwareCloudFoundationMigrationReconciler) progressVMotionPlan(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (ctrl.Result, error) {
-	message := "VMotion plan frozen; VM actions remain disabled pending the remaining safety stages"
+func (r *VmwareCloudFoundationMigrationReconciler) progressVMotionPlan(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus, requeue time.Duration) (ctrl.Result, error) {
+	message := vmotionPlanFrozenMessage
 	condition := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)
 	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != migrationv1alpha1.ReasonProgressing ||
 		condition.Message != message || condition.ObservedGeneration != migration.Generation {
@@ -755,7 +825,18 @@ func (r *VmwareCloudFoundationMigrationReconciler) progressVMotionPlan(ctx conte
 	if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: requeue}, nil
+}
+
+// validateNoTerminatingVMotionNodes keeps a Node replacement in the retry bucket
+// instead of reporting it as an ineligible cluster.
+func validateNoTerminatingVMotionNodes(nodes []corev1.Node) error {
+	for i := range nodes {
+		if !nodes[i].DeletionTimestamp.IsZero() {
+			return fmt.Errorf("node %q is terminating; wait for deletion to settle", nodes[i].Name)
+		}
+	}
+	return nil
 }
 
 func validateVMotionNodeRoles(nodes []corev1.Node) error {
@@ -778,8 +859,35 @@ func validateVMotionNodeRoles(nodes []corev1.Node) error {
 	if workers == 0 {
 		return fmt.Errorf("cluster must have at least one worker Node for VMotion")
 	}
-	if controlPlane > 500 || workers > 500 {
-		return fmt.Errorf("VMotion status supports at most 500 Nodes per role; found %d control-plane and %d worker Nodes", controlPlane, workers)
+	// Only the worker half is reachable: the control-plane count is fixed at three above.
+	if workers > 500 {
+		return fmt.Errorf("VMotion status supports at most 500 worker Nodes; found %d", workers)
+	}
+	return nil
+}
+
+// validateVMotionDestinationFailureDomain names the fields VMotion freezes for
+// destination placement. An empty topology.resourcePool is allowed and resolves
+// to the compute cluster's root pool.
+func validateVMotionDestinationFailureDomain(fd *configv1.VSpherePlatformFailureDomainSpec, destinationServer string) error {
+	missing := make([]string, 0, 4)
+	if fd.Server != destinationServer {
+		missing = append(missing, fmt.Sprintf("server %q", destinationServer))
+	}
+	if fd.Topology.Datacenter == "" {
+		missing = append(missing, "topology.datacenter")
+	}
+	if fd.Topology.ComputeCluster == "" {
+		missing = append(missing, "topology.computeCluster")
+	}
+	if fd.Topology.Datastore == "" {
+		missing = append(missing, "topology.datastore")
+	}
+	if len(fd.Topology.Networks) != 1 || fd.Topology.Networks[0] == "" {
+		missing = append(missing, "exactly one topology.networks entry")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("destination failure domain %q must specify %s for VMotion", fd.Name, strings.Join(missing, ", "))
 	}
 	return nil
 }
@@ -961,15 +1069,20 @@ func validateVMotionAssociationEvidence(machine *machinev1beta1.Machine, machine
 	}
 	// NodeLink falls back to internal IP after providerID lookup. An IP-only
 	// candidate can acquire a link, but is never sufficient VM identity here.
+	var unlinked []string
 	for _, address := range machine.Status.Addresses {
 		if address.Type != corev1.NodeInternalIP || address.Address == "" {
 			continue
 		}
 		for _, uid := range indexes.nodeByIP[address.Address] {
 			if !linkedNodes[uid] {
-				return fmt.Errorf("machine %s has an IP-only association with Node %q; ownership is indeterminate", machineRef, indexes.nodeByUID[uid].node.Name)
+				unlinked = append(unlinked, indexes.nodeByUID[uid].node.Name)
 			}
 		}
+	}
+	if len(unlinked) > 0 {
+		sort.Strings(unlinked)
+		return fmt.Errorf("machine %s has an IP-only association with Nodes %s; ownership is indeterminate", machineRef, strings.Join(unlinked, ", "))
 	}
 	return nil
 }

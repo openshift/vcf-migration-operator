@@ -169,7 +169,7 @@ func TestVMotionMachineAnnotationNodes(t *testing.T) {
 	}
 }
 
-func TestSameFrozenNodeList(t *testing.T) {
+func TestFrozenNodeDrift(t *testing.T) {
 	const changed = "changed"
 	baseline := &migrationv1alpha1.RoleMigrationStatus{Nodes: []migrationv1alpha1.NodeMigrationProgress{{
 		Name: "worker-a", NodeUID: "uid-a", ProviderID: "vsphere://11111111-1111-4111-8111-111111111111",
@@ -186,20 +186,20 @@ func TestSameFrozenNodeList(t *testing.T) {
 		name      string
 		existing  *migrationv1alpha1.RoleMigrationStatus
 		candidate *migrationv1alpha1.RoleMigrationStatus
-		want      bool
+		wantDrift bool
 	}{
 		{name: "both nil fail closed"},
-		{name: "existing nil", candidate: baseline},
-		{name: "candidate nil", existing: baseline},
-		{name: "empty lists", existing: &migrationv1alpha1.RoleMigrationStatus{}, candidate: &migrationv1alpha1.RoleMigrationStatus{}, want: true},
-		{name: "different lengths", existing: baseline, candidate: &migrationv1alpha1.RoleMigrationStatus{Nodes: baseline.Nodes[:1]}},
-		{name: "identical lists", existing: baseline, candidate: baseline.DeepCopy(), want: true},
+		{name: "existing nil", candidate: baseline, wantDrift: true},
+		{name: "candidate nil", existing: baseline, wantDrift: true},
+		{name: "empty lists", existing: &migrationv1alpha1.RoleMigrationStatus{}, candidate: &migrationv1alpha1.RoleMigrationStatus{}},
+		{name: "different lengths", existing: baseline, candidate: &migrationv1alpha1.RoleMigrationStatus{Nodes: baseline.Nodes[:1]}, wantDrift: true},
+		{name: "identical lists", existing: baseline, candidate: baseline.DeepCopy()},
 		{name: "reordered nodes", existing: baseline, candidate: &migrationv1alpha1.RoleMigrationStatus{Nodes: []migrationv1alpha1.NodeMigrationProgress{second, baseline.Nodes[0]}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := sameFrozenNodeList(tt.existing, tt.candidate); got != tt.want {
-				t.Fatalf("sameFrozenNodeList = %t, want %t", got, tt.want)
+			if drifted := frozenNodeDrift(vmotionWorkerRole, tt.existing, tt.candidate); (len(drifted) > 0) != tt.wantDrift {
+				t.Fatalf("frozenNodeDrift = %v, wantDrift %t", drifted, tt.wantDrift)
 			}
 		})
 	}
@@ -225,10 +225,43 @@ func TestSameFrozenNodeList(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			candidate := baseline.DeepCopy()
 			tt.mutate(&candidate.Nodes[1])
-			if sameFrozenNodeList(baseline, candidate) {
+			if drifted := frozenNodeDrift(vmotionWorkerRole, baseline, candidate); len(drifted) == 0 {
 				t.Fatal("changed frozen node field was accepted")
 			}
 		})
+	}
+}
+
+func TestVMotionReconcileSlowsSteadyStateRequeue(t *testing.T) {
+	h := newVMotionPlanHarness(t)
+	// mapping recorded, plan frozen, then steady-state drift checks.
+	for i, want := range []time.Duration{10 * time.Second, 30 * time.Second, vmotionPlanSteadyStateRequeue, vmotionPlanSteadyStateRequeue} {
+		result, err := h.reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: h.key})
+		if err != nil {
+			t.Fatalf("Reconcile %d: %v", i+1, err)
+		}
+		if result.RequeueAfter != want {
+			t.Fatalf("Reconcile %d requeue = %v, want %v", i+1, result.RequeueAfter, want)
+		}
+		if err := h.apiClient.Get(context.Background(), h.key, h.migration); err != nil {
+			t.Fatalf("getting migration: %v", err)
+		}
+	}
+}
+
+func TestValidateNoTerminatingVMotionNodes(t *testing.T) {
+	now := metav1.Now()
+	settled := newVMotionPlanNode("worker-a", vmotionWorkerRole, "vsphere://11111111-1111-4111-8111-111111111111", "uid-a", false)
+	terminating := newVMotionPlanNode("control-plane-a", vmotionControlPlaneRole, "vsphere://22222222-2222-4222-8222-222222222222", "uid-b", false)
+	terminating.DeletionTimestamp = &now
+	if err := validateNoTerminatingVMotionNodes([]corev1.Node{settled}); err != nil {
+		t.Fatalf("settled Nodes were rejected: %v", err)
+	}
+	if err := validateNoTerminatingVMotionNodes([]corev1.Node{settled, terminating}); err == nil || !strings.Contains(err.Error(), "is terminating") {
+		t.Fatalf("terminating Node error = %v, want terminating error", err)
+	}
+	if err := validateVMotionNodeRoles([]corev1.Node{settled, terminating}); err == nil {
+		t.Fatal("role counting accepted a terminating Node")
 	}
 }
 
@@ -363,8 +396,8 @@ func TestVMotionReconcileFreezesDistinctFailureDomainMappings(t *testing.T) {
 		t.Fatalf("updating migration: %v", err)
 	}
 	inventoryFunc := h.reconciler.vmotionInventoryFunc
-	h.reconciler.vmotionInventoryFunc = func(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
-		inventory, err := inventoryFunc(ctx, sourceVC, sourceFDs, ids)
+	h.reconciler.vmotionInventoryFunc = func(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, liveServer string, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
+		inventory, err := inventoryFunc(ctx, sourceVC, liveServer, sourceFDs, ids)
 		secondOwner := h.sourceFDReference
 		secondOwner.Value = "domain-second"
 		inventory.SourceFailureDomainReferences["source-fd-2"] = secondOwner

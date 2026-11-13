@@ -227,8 +227,8 @@ func TestVMotionPlanningReadsQuiescenceBeforeInventory(t *testing.T) {
 func TestVMotionRechecksProvisioningAfterInventory(t *testing.T) {
 	h := newVMotionPlanHarness(t)
 	list := h.reconciler.vmotionInventoryFunc
-	h.reconciler.vmotionInventoryFunc = func(ctx context.Context, vc *configv1.VSpherePlatformVCenterSpec, fds []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
-		inventory, err := list(ctx, vc, fds, ids)
+	h.reconciler.vmotionInventoryFunc = func(ctx context.Context, vc *configv1.VSpherePlatformVCenterSpec, liveServer string, fds []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
+		inventory, err := list(ctx, vc, liveServer, fds, ids)
 		if err != nil {
 			return inventory, err
 		}

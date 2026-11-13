@@ -343,10 +343,10 @@ func newVMotionPlanHarness(t *testing.T) *vmotionPlanHarness {
 		Client: apiClient, APIReader: apiClient, KubeClient: kubeClient,
 		ConfigClient: configfake.NewClientset(infrastructure), MachineClient: machinefake.NewClientset(),
 		Recorder: events.NewFakeRecorder(10),
-		vmotionInventoryFunc: func(_ context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
+		vmotionInventoryFunc: func(_ context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, liveServer string, sourceFDs []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
 			harness.inventoryCalls++
-			if !sameVMotionVCenter(sourceVC.Server, sourceServer) || len(ids) != harness.expectedInventoryCount {
-				t.Fatalf("VM inventory request = source %q and %d identities, want source %q and %d identities", sourceVC.Server, len(ids), sourceServer, harness.expectedInventoryCount)
+			if !sameVMotionVCenter(sourceVC.Server, sourceServer) || !sameVMotionVCenter(liveServer, sourceServer) || len(ids) != harness.expectedInventoryCount {
+				t.Fatalf("VM inventory request = source %q live %q and %d identities, want source %q live %q and %d identities", sourceVC.Server, liveServer, len(ids), sourceServer, sourceServer, harness.expectedInventoryCount)
 			}
 			fdRefs := make(map[string]vsphere.VMotionManagedObjectReference, len(sourceFDs))
 			for i := range sourceFDs {
@@ -939,7 +939,7 @@ func TestVMotionInventoryRejectsUntrustedSourceCertificate(t *testing.T) {
 func TestListVMotionVMInventoryUsesBoundedContext(t *testing.T) {
 	called := false
 	r := &VmwareCloudFoundationMigrationReconciler{
-		vmotionInventoryFunc: func(ctx context.Context, _ *configv1.VSpherePlatformVCenterSpec, _ []configv1.VSpherePlatformFailureDomainSpec, _ []string) (vsphere.VMotionInventory, error) {
+		vmotionInventoryFunc: func(ctx context.Context, _ *configv1.VSpherePlatformVCenterSpec, _ string, _ []configv1.VSpherePlatformFailureDomainSpec, _ []string) (vsphere.VMotionInventory, error) {
 			called = true
 			deadline, ok := ctx.Deadline()
 			if !ok {
@@ -1140,8 +1140,17 @@ func TestBuildVMotionPlanRejectsMissingOrAmbiguousVM(t *testing.T) {
 
 	invalidNetworkMigration := migration.DeepCopy()
 	invalidNetworkMigration.Spec.FailureDomains[0].Topology.Networks = []string{"network-a", "network-b"}
-	if _, err := buildVMotionPlan(invalidNetworkMigration, sourceVC, "target.example.com", []configv1.VSpherePlatformFailureDomainSpec{sourceFD}, mapping, invalidNetworkMigration.Spec.FailureDomains, []vmotionNodeIdentity{identity}, vsphere.VMotionInventory{VMs: []vsphere.VMotionVM{vm}, SourceFailureDomainReferences: map[string]vsphere.VMotionManagedObjectReference{"source-fd": owner}}); err == nil || !strings.Contains(err.Error(), "one server, datacenter, compute cluster, resource pool, datastore, and network") {
+	if _, err := buildVMotionPlan(invalidNetworkMigration, sourceVC, "target.example.com", []configv1.VSpherePlatformFailureDomainSpec{sourceFD}, mapping, invalidNetworkMigration.Spec.FailureDomains, []vmotionNodeIdentity{identity}, vsphere.VMotionInventory{VMs: []vsphere.VMotionVM{vm}, SourceFailureDomainReferences: map[string]vsphere.VMotionManagedObjectReference{"source-fd": owner}}); err == nil || !strings.Contains(err.Error(), "exactly one topology.networks entry") {
 		t.Fatalf("ambiguous target network error = %v, want single-network placement requirement", err)
+	}
+	withoutPool := migration.DeepCopy()
+	withoutPool.Spec.FailureDomains[0].Topology.ResourcePool = ""
+	status, err := buildVMotionPlan(withoutPool, sourceVC, "target.example.com", []configv1.VSpherePlatformFailureDomainSpec{sourceFD}, mapping, withoutPool.Spec.FailureDomains, []vmotionNodeIdentity{identity}, vsphere.VMotionInventory{VMs: []vsphere.VMotionVM{vm}, SourceFailureDomainReferences: map[string]vsphere.VMotionManagedObjectReference{"source-fd": owner}})
+	if err != nil {
+		t.Fatalf("buildVMotionPlan without a destination resource pool: %v", err)
+	}
+	if got := status.Workers.Nodes[0].TargetResourcePool; got != "/TargetDC/host/TargetCluster/Resources" {
+		t.Fatalf("derived target resource pool = %q, want the compute cluster root pool", got)
 	}
 }
 

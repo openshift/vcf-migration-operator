@@ -28,8 +28,8 @@ func TestVMotionInventoryRetriesNodeIdentityDrift(t *testing.T) {
 				}
 				original := h.migration.Status.NodeMigration.DeepCopy()
 				list := h.reconciler.vmotionInventoryFunc
-				h.reconciler.vmotionInventoryFunc = func(ctx context.Context, vc *configv1.VSpherePlatformVCenterSpec, fds []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
-					inventory, err := list(ctx, vc, fds, ids)
+				h.reconciler.vmotionInventoryFunc = func(ctx context.Context, vc *configv1.VSpherePlatformVCenterSpec, liveServer string, fds []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
+					inventory, err := list(ctx, vc, liveServer, fds, ids)
 					node, getErr := h.kubeClient.CoreV1().Nodes().Get(ctx, "worker-a", metav1.GetOptions{})
 					if getErr != nil {
 						t.Fatal(getErr)
@@ -153,8 +153,8 @@ func TestVMotionInventoryIgnoresNodeListOrder(t *testing.T) {
 	h := newVMotionPlanHarness(t)
 	h.reconcile(t)
 	list := h.reconciler.vmotionInventoryFunc
-	h.reconciler.vmotionInventoryFunc = func(ctx context.Context, vc *configv1.VSpherePlatformVCenterSpec, fds []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
-		inventory, err := list(ctx, vc, fds, ids)
+	h.reconciler.vmotionInventoryFunc = func(ctx context.Context, vc *configv1.VSpherePlatformVCenterSpec, liveServer string, fds []configv1.VSpherePlatformFailureDomainSpec, ids []string) (vsphere.VMotionInventory, error) {
+		inventory, err := list(ctx, vc, liveServer, fds, ids)
 		nodes, e := h.kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 		if e != nil {
 			t.Fatal(e)
