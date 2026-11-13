@@ -108,11 +108,19 @@ original cordon state, selected source FD and owner reference in the sanitized
 plan fingerprint, selected target failure domain, resource pool, datastore,
 and one destination network for the supported one-NIC VM. Plans block if either
 the VM or destination specification is ambiguous about that one-NIC mapping.
-Host is deliberately not pinned: the relocation request leaves
+A destination failure domain must set `topology.datacenter`, `topology.computeCluster`,
+`topology.datastore` and exactly one `topology.networks` entry; the error names
+whichever is missing. `topology.resourcePool` stays optional and an empty value
+freezes the compute cluster's root pool, `<topology.computeCluster>/Resources`,
+as the legacy path does. Host is deliberately not pinned: the relocation request leaves
 Host unset for destination-cluster placement, then the workflow records the
 observed destination host in `status.nodeMigration.*.nodes[].targetHost` after
 the move. Reconciles reuse the frozen plan and block on identity, mapping, or
-placement drift. PR 2 stops after this read-only plan; it issues no VM actions.
+placement drift; the message names each differing field, and the frozen plan is
+never republished. The only remedy is to delete and recreate the migration CR,
+which is safe because planning issues no VM action. A frozen plan is re-checked
+every 5 minutes, while progressing, retry and blocked states keep 30 seconds.
+PR 2 stops after this read-only plan; it issues no VM actions.
 
 ### Shared action/backend contract
 

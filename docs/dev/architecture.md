@@ -70,6 +70,8 @@ Done (set completionTime)
 | Old machine deletion | 30s |
 | Operator health check | 30s |
 | Ready stability observations | 30s minimum spacing (6 required to converge `Ready`); counter resets after a >90s reconcile gap |
+| VMotion plan freeze/retry/blocked | 30s |
+| Frozen VMotion plan drift re-check | 5m |
 | Old-worker stall events | debounced to one per 5 minutes per MachineSet |
 | Error backoff | 5s base, 5m max (exponential) |
 

@@ -11,11 +11,35 @@ first VM-changing action. Production VM actions remain outside this PR.
 | 3. Switching away from frozen VMotion plan | Accepted limitation | Already documented as deferred limitation A in `vmotion-eligibility.md`. Unsupported spec edits are not prevented and can dispatch the mutating legacy workflow. |
 | 4. Missing StartTime/Ready | Fixed | Shared Running initialization precedes engine dispatch. Planning seeds Ready=False and records StartTime once, preserving it across retries and pause/resume. |
 | 5. Backend/function signature difference | Not a demonstrated defect | Interface method accepts vCenter/datacenter; standalone helper accepts an established session. An adapter bridges these layers. PR #231 still uses the standalone helper for planning and explicitly defers the production vSphere adapter. No signature change needed here. |
-| 6. Repeated authentication/inventory after freeze | Optimization deferred | Live observations establish drift, including source resource-pool owner changes. Stored fingerprint and CR generation alone cannot establish unchanged vSphere state. |
+| 6. Repeated authentication/inventory after freeze | Cadence fixed, optimization deferred | Live observations establish drift, including source resource-pool owner changes. Stored fingerprint and CR generation alone cannot establish unchanged vSphere state, so each check still logs in and inventories. Steady-state checks now requeue every 5 minutes instead of 30 seconds; session reuse and per-VM lookup reuse remain deferred. |
 | 7. Sequential per-VM lookups | Optimization deferred | Cluster/network-dependent cost remains unmeasured. Reuse shared resource-pool observations within a read before considering bounded concurrency; no performance target assumed from API list limits. |
 | 8. Repeated condition/event plumbing | Cleanup deferred | Helpers have different event, error and requeue behavior. No generic status-update abstraction introduced. |
 | 9. Kind-specific settled checks | Keep current design | Machine, MachineSet, CPMS and MHC have distinct lifecycle semantics. Shared selector helper already exists; generic settled predicate would obscure safety rules. |
-| 10. Repeated eligibility reads | Cleanup deferred | Reads before and after inventory are intentional. Extraction must preserve fresh post-inventory Node/Machine API reads and retry-versus-blocked classification. |
+| 10. Repeated eligibility reads | Cleanup deferred | Reads before and after inventory are intentional. Extraction must preserve fresh post-inventory Node/Machine API reads and retry-versus-blocked classification. Post-inventory role, identity and terminating-Node failures now retry instead of blocking. |
+| Review follow-ups: file cohesion, backend contract assertion | Deferred | Splitting `vmotion_plan.go` would churn the frozen-plan tests without changing behavior. The interface assertion belongs to the PR 3 adapter, since no concrete `VMotionBackend` implementation exists yet. |
+
+## Operator-facing requirements and remedies
+
+- **Frozen plan drift.** A frozen plan is never republished. Any change to a
+  frozen identity or placement field (Node set, UID, providerID, BIOS UUID,
+  source inventory path, selected failure domain, target pool/datastore/network,
+  frozen vCenter/datacenter/mode) blocks with `ReasonFailed`. The condition
+  message names each differing field. The supported remedy is to delete and
+  recreate the migration CR: planning is read-only and issues no VM action, and
+  re-freezing an existing CR is not supported. `spec.nodeMigration.recoveryRequest`
+  is inert in this PR and is not a remedy.
+- **Destination `topology.resourcePool`.** It stays optional. When empty, VMotion
+  uses the compute cluster's root pool, `<topology.computeCluster>/Resources`,
+  through the same `EffectiveResourcePool` helper the legacy path uses. VMotion
+  requires `topology.datacenter`, `topology.computeCluster`, `topology.datastore`
+  and exactly one `topology.networks` entry on the destination failure domain;
+  the error names whichever is missing.
+- **Post-freeze polling cadence.** After a plan is frozen, the drift check
+  requeues every 5 minutes (`vmotionPlanSteadyStateRequeue`) instead of 30
+  seconds, since each check repeats a vCenter login and datacenter inventory.
+  Progressing, blocked and retry paths keep 30 seconds. This is a cadence choice,
+  not the deferred session-reuse or per-VM lookup optimisation recorded as
+  findings #6/#7, which still require measurement.
 
 ## Future inventory optimization
 
