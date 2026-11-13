@@ -17,8 +17,7 @@ COPY api/ api/
 COPY internal/ internal/
 
 # Build
-# VCF Migration Operator only supports x86_64 architecture
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -p=4 -o manager cmd/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -p=4 -o manager cmd/main.go
 
 
 # Use ubi-micro as base image to package the manager binary
