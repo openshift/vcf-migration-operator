@@ -75,6 +75,9 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	// checkNetworkingViaProbeVMsFunc overrides the probe-VM networking check in
 	// tests; nil selects the real implementation.
 	checkNetworkingViaProbeVMsFunc func(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, sourceVC *configv1.VSpherePlatformVCenterSpec) error
+	// vmotionInventoryFunc overrides the read-only source VM inventory lookup in tests.
+	// liveServer is the Infrastructure spelling used for credential lookup.
+	vmotionInventoryFunc func(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, liveServer string, sourceFailureDomains []configv1.VSpherePlatformFailureDomainSpec, biosUUIDs []string) (vsphere.VMotionInventory, error)
 
 	// lastStallEventKey identifies the set of old worker machines described by the
 	// most recent OldWorkersStalled Warning event; lastStallEventTime is when that
@@ -311,14 +314,22 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 		}
 	}
 
+	r.seedReadyCondition(migration)
+
 	// Set start time on first reconcile in Running state.
 	if migration.Status.StartTime == nil {
 		now := metav1.Now()
 		migration.Status.StartTime = &now
-		r.Recorder.Eventf(migration, nil, "Normal", "MigrationStarted", "MigrationStarted", "Migration workflow started")
+		if r.Recorder != nil {
+			r.Recorder.Eventf(migration, nil, "Normal", "MigrationStarted", "MigrationStarted", "Migration workflow started")
+		}
 		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	if hasVMotionSelection(migration) {
+		return r.reconcileVMotionPlan(ctx, migration, baseStatus)
 	}
 
 	// Walk conditions in order; execute work for the first non-True condition.
@@ -336,7 +347,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 		return ctrl.Result{}, err
 	}
 
-	r.seedReadyCondition(migration)
 	ctx = r.executionContext(ctx, migration)
 
 	for _, condType := range conditionOrder {
@@ -1636,6 +1646,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			latest.Status.FailureDomainMappings = migration.Status.FailureDomainMappings
 			hasChanges = true
 		}
+		if mergeInitialNodeMigrationPlan(migration, latest, baseStatus) {
+			hasChanges = true
+		}
 		// Worker MachineSet names are append-only: merge this reconcile's
 		// newly recorded names into latest so they persist before cleanup can
 		// delete the source MachineSets they were derived from.
@@ -1669,6 +1682,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		return fmt.Errorf("updating migration status: %w", err)
 	}
 	return nil
+}
+
+// mergeInitialNodeMigrationPlan publishes the first frozen VMotion plan only
+// when no concurrent reconcile has already committed one.
+func mergeInitialNodeMigrationPlan(migration, latest *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) bool {
+	if migration.Status.NodeMigration == nil || baseStatus.NodeMigration != nil || latest.Status.NodeMigration != nil ||
+		migration.Generation != latest.Generation || migration.UID != latest.UID {
+		return false
+	}
+	latest.Status.NodeMigration = migration.Status.NodeMigration.DeepCopy()
+	return true
 }
 
 // mergeCompletionRecord binds completion atomically to the spec that this
@@ -2001,7 +2025,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkMappingForReconcile(ctx 
 		// Event fires once per drift, not on every reconcile while drifted.
 		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
 		alreadyRecorded := isMappingRejection(cond) && cond.ObservedGeneration == migration.Generation
-		if !alreadyRecorded {
+		if !alreadyRecorded && r.Recorder != nil {
 			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonMappingRejected, migrationv1alpha1.ReasonMappingRejected, "%s", err)
 		}
 		r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonMappingRejected, err.Error())
