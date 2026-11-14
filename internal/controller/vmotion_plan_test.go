@@ -515,7 +515,7 @@ func assertVMotionNodeTargets(t *testing.T, nodes []migrationv1alpha1.NodeMigrat
 		if progress.NodeUID == "" || progress.ProviderID == "" || progress.VMBIOSUUID == "" || progress.SourceInventoryPath == "" || progress.RequestedMode != migrationv1alpha1.VMotionModeHot {
 			t.Fatalf("Node %q frozen identity = %+v, want Node/VM IDs and Hot mode", progress.Name, progress)
 		}
-		if progress.TargetFailureDomain != "target-fd" || progress.TargetResourcePool != "/TargetDC/host/TargetCluster/Resources" ||
+		if progress.TargetFailureDomain != "target-fd" || progress.TargetDatacenter != executionTestTargetDC || progress.TargetResourcePool != "/TargetDC/host/TargetCluster/Resources" ||
 			progress.TargetDatastore != "/TargetDC/datastore/TargetDS" || progress.TargetNetwork != "/TargetDC/network/VM Network" {
 			t.Fatalf("Node %q target placement = %+v, want frozen FD/pool/datastore/network", progress.Name, progress)
 		}

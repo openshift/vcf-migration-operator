@@ -79,6 +79,16 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	// liveServer is the Infrastructure spelling used for credential lookup.
 	vmotionInventoryFunc func(ctx context.Context, sourceVC *configv1.VSpherePlatformVCenterSpec, liveServer string, sourceFailureDomains []configv1.VSpherePlatformFailureDomainSpec, biosUUIDs []string) (vsphere.VMotionInventory, error)
 
+	// VMotionBackend permits only observation here; action submission belongs to
+	// the later admitted workflow and is not enabled by providing this adapter.
+	VMotionBackend vsphere.VMotionReadOnlyBackend
+	// VMotionRecoveryCheck must verify claimant quiescence, outcome/inactivity, VM/Node identity,
+	// location/power, applicable health and live plan/inventory without mutations.
+	// It must honor its bounded context, including after internal waits.
+	// Uncertain evidence is a nonterminal observation; errors mean read failures.
+	// Nil blocks recovery until the qualified orchestration supplies these checks.
+	VMotionRecoveryCheck func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration) (migrationv1alpha1.NodeMigrationObservationState, error)
+
 	// lastStallEventKey identifies the set of old worker machines described by the
 	// most recent OldWorkersStalled Warning event; lastStallEventTime is when that
 	// event was recorded. Together they debounce the event to at most one per
@@ -237,6 +247,12 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
+	// Observe existing VMotion claims before pause/spec/deletion gates. Explicit
+	// deletion handoff must remain possible even when vCenter is unavailable.
+	if stop, result, err := r.reconcileVMotionAction(ctx, migration); stop || err != nil {
+		return result, err
+	}
+
 	// Deletion stops new actions only: nothing is cancelled, powered off,
 	// deleted, or rolled back. The record is retained behind the finalizer
 	// until the migration is complete or an administrator allows deletion.
@@ -245,8 +261,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		adminAllowed := migration.Annotations[migrationv1alpha1.AnnotationAllowDeletion] == "true"
-		if complete || adminAllowed {
+		adminAllowed := migration.Annotations[migrationv1alpha1.AnnotationAllowDeletion] == allowDeletionAnnotationValue
+		if (complete && !hasUnresolvedVMotionAction(migration)) || adminAllowed {
 			if err := r.updateRetentionFinalizer(ctx, migration); err != nil {
 				return ctrl.Result{}, fmt.Errorf("removing finalizer %s: %w", migrationv1alpha1.FinalizerName, err)
 			}
@@ -262,11 +278,16 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		if !alreadyRecorded {
 			message := fmt.Sprintf("deletion is blocked until the migration completes or an administrator sets the annotation %s=\"true\"", migrationv1alpha1.AnnotationAllowDeletion)
 			log.Info("retaining deleted migration record while work is outstanding")
-			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonDeletionBlocked, migrationv1alpha1.ReasonDeletionBlocked, "%s", message)
+			if r.Recorder != nil {
+				r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonDeletionBlocked, migrationv1alpha1.ReasonDeletionBlocked, "%s", message)
+			}
 			r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonDeletionBlocked, message)
 			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 				return ctrl.Result{}, err
 			}
+		}
+		if hasVMotionAction(migration) {
+			return ctrl.Result{RequeueAfter: vmotionObservationInterval}, nil
 		}
 		return ctrl.Result{}, nil
 	}

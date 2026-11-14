@@ -617,7 +617,7 @@ func buildVMotionPlan(migration *migrationv1alpha1.VmwareCloudFoundationMigratio
 		progress := migrationv1alpha1.NodeMigrationProgress{
 			Name: identity.node.Name, State: migrationv1alpha1.NodeMigrationStatePending, RequestedMode: mode,
 			VMBIOSUUID: biosUUID, NodeUID: identity.node.UID, ProviderID: identity.node.Spec.ProviderID,
-			OriginalSchedulingState: schedulingState, TargetFailureDomain: destinationFD.Name,
+			OriginalSchedulingState: schedulingState, TargetFailureDomain: destinationFD.Name, TargetDatacenter: destinationFD.Topology.Datacenter,
 			TargetResourcePool: resourcePool, TargetDatastore: destinationFD.Topology.Datastore,
 			TargetNetwork: destinationFD.Topology.Networks[0], SourceInventoryPath: vm.InventoryPath,
 		}
@@ -784,6 +784,7 @@ func frozenNodeDrift(role string, existing, candidate *migrationv1alpha1.RoleMig
 			{"requested mode", string(previous.RequestedMode), string(node.RequestedMode)},
 			{"original scheduling state", string(previous.OriginalSchedulingState), string(node.OriginalSchedulingState)},
 			{"target failure domain", previous.TargetFailureDomain, node.TargetFailureDomain},
+			{"target datacenter", previous.TargetDatacenter, node.TargetDatacenter},
 			{"target resource pool", previous.TargetResourcePool, node.TargetResourcePool},
 			{"target datastore", previous.TargetDatastore, node.TargetDatastore},
 			{"target network", previous.TargetNetwork, node.TargetNetwork},

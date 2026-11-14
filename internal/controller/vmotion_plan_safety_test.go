@@ -216,6 +216,7 @@ func TestFrozenNodeDrift(t *testing.T) {
 			n.OriginalSchedulingState = migrationv1alpha1.NodeMigrationSchedulingStateUnschedulable
 		}},
 		{name: "TargetFailureDomain", mutate: func(n *migrationv1alpha1.NodeMigrationProgress) { n.TargetFailureDomain = changed }},
+		{name: "TargetDatacenter", mutate: func(n *migrationv1alpha1.NodeMigrationProgress) { n.TargetDatacenter = changed }},
 		{name: "TargetResourcePool", mutate: func(n *migrationv1alpha1.NodeMigrationProgress) { n.TargetResourcePool = changed }},
 		{name: "TargetDatastore", mutate: func(n *migrationv1alpha1.NodeMigrationProgress) { n.TargetDatastore = changed }},
 		{name: "TargetNetwork", mutate: func(n *migrationv1alpha1.NodeMigrationProgress) { n.TargetNetwork = changed }},
