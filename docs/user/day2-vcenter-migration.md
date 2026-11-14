@@ -635,8 +635,14 @@ oc get co
   then the old machine is removed — and a replacement that fails holds the rollout until it is fixed.
 - A `Degraded` or `Error` condition on the ControlPlaneMachineSet names the problem: read its reason
   and message, fix what it points at, and the operator recomputes the condition on its next
-  reconcile.
-- If etcd degrades, stop and address it before letting the rollout continue.
+  reconcile. Brief `Degraded` windows during a replacement are normal: the new node registers with
+  its kubelet before its machine links it, so the operator may report `UnmanagedNodes` for a few
+  minutes until the mapping settles — a condition that persists while no replacement is
+  progressing is the real signal.
+- If etcd degrades, stop and address it before letting the rollout continue. `NodeControllerDegraded`
+  and `EnvVarControllerDegraded` flash while a replacement master joins — kubelet and CNI starting,
+  serving cert pending — and clear as the node becomes Ready. Etcd degraded outside a join window
+  means stop.
 
 ---
 
@@ -768,6 +774,11 @@ oc get nodes \
 
 # node providerID is vsphere://<bios-uuid> and carries no vCenter name — use the Machine labels above
 
+# Right after Step 9, the static-pod operators (etcd, kube-apiserver, openshift-apiserver) may show
+# Progressing for several minutes while their pod revisions finish rolling to the new masters —
+# that is expected; wait until they report Available and not Progressing before verifying.
+# Only a Degraded or unavailable operator is an immediate problem.
+
 # Healthy
 oc get co
 oc get nodes
@@ -875,7 +886,8 @@ feature gate is not enabled — return to Before you start; there is no supporte
 
 **The control plane rollout stalls part-way**
 
-- A `Degraded`/`Error` condition on the ControlPlaneMachineSet does not clear by itself. Investigate the
+- A `Degraded`/`Error` condition on the ControlPlaneMachineSet does not clear by itself once no
+  replacement is progressing. Investigate the
   machine that is stuck, the Control Plane Machine Set operator, and etcd. Do not continue the migration
   until the rollout completes.
 
