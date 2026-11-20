@@ -22,6 +22,7 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 )
 
@@ -225,7 +226,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) recordEffectiveVMotionMapping
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())
 	}
 	migration.Status.FailureDomainMappings = mappings
-	r.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Recorded effective failure-domain mapping for VMotion planning")
+	util.SetCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Recorded effective failure-domain mapping for VMotion planning")
 	if r.Recorder != nil {
 		r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ReasonProgressing, migrationv1alpha1.ReasonProgressing, "Recorded effective failure-domain mapping for VMotion planning")
 	}
@@ -816,9 +817,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) retryVMotionPlan(ctx context.
 	condition := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)
 	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != migrationv1alpha1.ReasonRetrying ||
 		condition.Message != message || condition.ObservedGeneration != migration.Generation {
-		r.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionFalse, migrationv1alpha1.ReasonRetrying, message)
+		util.SetCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionFalse, migrationv1alpha1.ReasonRetrying, message)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonRetrying, migrationv1alpha1.ReasonRetrying, "%s", truncateToBytes(message, maxEventNoteBytes))
+			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonRetrying, migrationv1alpha1.ReasonRetrying, "%s", util.TruncateToBytes(message, util.MaxEventNoteBytes))
 		}
 	}
 	if statusErr := r.updateStatus(ctx, migration, baseStatus); statusErr != nil {
@@ -832,7 +833,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) progressVMotionPlan(ctx conte
 	condition := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)
 	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != migrationv1alpha1.ReasonProgressing ||
 		condition.Message != message || condition.ObservedGeneration != migration.Generation {
-		r.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, message)
+		util.SetCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, message)
 		if r.Recorder != nil {
 			r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ReasonProgressing, migrationv1alpha1.ReasonProgressing, "%s", message)
 		}
@@ -1126,10 +1127,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) blockVMotionPlan(ctx context.
 		condition.Reason == migrationv1alpha1.ReasonFailed && condition.Message == message &&
 		condition.ObservedGeneration == migration.Generation
 	if !alreadyBlocked {
-		r.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, message)
+		util.SetCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, message)
 		if r.Recorder != nil {
 			note := fmt.Sprintf("Condition %s failed: %s", migrationv1alpha1.ConditionInfrastructurePrepared, message)
-			r.Recorder.Eventf(migration, nil, "Warning", "ConditionFailed", "ConditionFailed", "%s", truncateToBytes(note, maxEventNoteBytes))
+			r.Recorder.Eventf(migration, nil, "Warning", "ConditionFailed", "ConditionFailed", "%s", util.TruncateToBytes(note, util.MaxEventNoteBytes))
 		}
 	}
 	if err := r.updateStatus(ctx, migration, baseStatus); err != nil {

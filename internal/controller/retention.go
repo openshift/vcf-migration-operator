@@ -13,14 +13,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 )
 
 func (r *VmwareCloudFoundationMigrationReconciler) permissionReader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	// Unit tests may use a non-caching fake client; production injects APIReader.
-	return r.Client
+	return util.PermissionReader(r.APIReader, r.Client)
 }
 
 func completionSpecHash(spec migrationv1alpha1.VmwareCloudFoundationMigrationSpec) (string, error) {

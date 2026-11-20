@@ -20,13 +20,11 @@ import (
 	"context"
 	"fmt"
 
-	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
-	"github.com/openshift/vcf-migration-operator/internal/execution"
-	"github.com/openshift/vcf-migration-operator/internal/openshift"
-	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 const (
@@ -37,43 +35,6 @@ const (
 	// eventReasonControlPlaneRollout is the event reason while the control plane rolls out.
 	eventReasonControlPlaneRollout = "ControlPlaneRollout"
 )
-
-// getVSphereSession creates a vSphere session for the given server and datacenter
-// using the provided credentials.
-func getVSphereSession(ctx context.Context, server, datacenter, username, password string) (*vsphere.Session, error) {
-	return vsphere.GetOrCreate(ctx, vsphere.Params{
-		Server:     server,
-		Datacenter: datacenter,
-		Username:   username,
-		Password:   password,
-		Insecure:   true,
-	})
-}
-
-// getTargetCredentials resolves the username and password for a target vCenter server
-// from the migration's target credentials secret. The secret is expected to have keys
-// in the format {server}.username and {server}.password.
-func getTargetCredentials(ctx context.Context, kubeClient kubernetes.Interface, migration *migrationv1alpha1.VmwareCloudFoundationMigration, server string) (username, password string, err error) {
-	log := klog.FromContext(ctx)
-	log.V(2).Info("resolving target credentials", "server", server)
-
-	secretRef := migration.Spec.TargetVCenterCredentialsSecret
-	if secretRef.Name == "" {
-		return "", "", fmt.Errorf("spec.targetVCenterCredentialsSecret.name must not be empty")
-	}
-	ns := secretRef.Namespace
-	if ns == "" {
-		ns = migration.Namespace
-	}
-
-	sm := openshift.NewSecretManager(kubeClient)
-	username, password, err = sm.GetVCenterCredsFromSecret(ctx, ns, secretRef.Name, server)
-	if err != nil {
-		return "", "", fmt.Errorf("getting target credentials for %s from secret %s/%s: %w", server, ns, secretRef.Name, err)
-	}
-
-	return username, password, nil
-}
 
 // syncControllerConfig restarts Machine Config Operator pods by deleting pods
 // in the openshift-machine-config-operator namespace with the well-known prefix.

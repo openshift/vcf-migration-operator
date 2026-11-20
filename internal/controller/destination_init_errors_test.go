@@ -23,6 +23,7 @@ import (
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/execution"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 )
 
@@ -474,7 +475,7 @@ func TestEnsureFolderAndOwnershipErrors(t *testing.T) {
 	t.Run("create VM folder failure", func(t *testing.T) {
 		s := newDestSim(t)
 		r := s.reconciler(t, "target-vcenter-creds", "dest-infra")
-		session, err := getVSphereSession(s.ctx, s.host, s.inventory.datacenterName, s.user, s.pass)
+		session, err := util.GetVSphereSession(s.ctx, s.host, s.inventory.datacenterName, s.user, s.pass)
 		if err != nil {
 			t.Fatalf("getVSphereSession: %v", err)
 		}
@@ -489,7 +490,7 @@ func TestEnsureFolderAndOwnershipErrors(t *testing.T) {
 	t.Run("ensure cluster ownership tag failure", func(t *testing.T) {
 		s := newDestSim(t)
 		r := s.reconciler(t, "target-vcenter-creds", "dest-infra")
-		session, err := getVSphereSession(s.ctx, s.host, s.inventory.datacenterName, s.user, s.pass)
+		session, err := util.GetVSphereSession(s.ctx, s.host, s.inventory.datacenterName, s.user, s.pass)
 		if err != nil {
 			t.Fatalf("getVSphereSession: %v", err)
 		}

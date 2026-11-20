@@ -18,7 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
-	"github.com/openshift/vcf-migration-operator/internal/storageplan"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 )
 
 // addPlannedVolume adds a bound vSphere PV and PVC in namespace to the fixture.
@@ -57,10 +58,7 @@ func listStoragePlans(t *testing.T, r *VmwareCloudFoundationMigrationReconciler)
 }
 
 func TestStoragePlanNamespaceWriteFailureBlocksOnlyThatNamespace(t *testing.T) {
-	r, m := planningFixture(t)
-	addPlannedVolume(t, r, "dying")
-	underlying := r.Client.(client.WithWatch)
-	r.Client = interceptor.NewClient(underlying, interceptor.Funcs{
+	faults := interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if obj.GetNamespace() != "dying" {
 				return c.Create(ctx, obj, opts...)
@@ -70,7 +68,11 @@ func TestStoragePlanNamespaceWriteFailureBlocksOnlyThatNamespace(t *testing.T) {
 			err.ErrStatus.Details.Causes = append(err.ErrStatus.Details.Causes, metav1.StatusCause{Type: corev1.NamespaceTerminatingCause, Field: "metadata.namespace"})
 			return err
 		},
+	}
+	r, m := planningFixture(t, func(r *VmwareCloudFoundationMigrationReconciler, _ *migrationv1alpha1.VmwareCloudFoundationMigration) {
+		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), faults)
 	})
+	addPlannedVolume(t, r, "dying")
 
 	got := reconcilePlan(t, r, m)
 	requirePlanCondition(t, got, migrationv1alpha1.ConditionStoragePlanned, migrationv1alpha1.ReasonPlanBlocked, metav1.ConditionFalse)
@@ -116,8 +118,8 @@ func TestStoragePlansReleasedWhenStorageDisabled(t *testing.T) {
 	}
 	m.Spec.MigrateStorage = false
 	m.Spec.Storage = nil
-	if _, err := r.ensureStoragePlanned(context.Background(), m); err != nil {
-		t.Fatalf("ensureStoragePlanned: %v", err)
+	if _, err := r.StorageController.EnsureStoragePlanned(context.Background(), m); err != nil {
+		t.Fatalf("EnsureStoragePlanned: %v", err)
 	}
 	requirePlanCondition(t, m, migrationv1alpha1.ConditionStoragePlanned, migrationv1alpha1.ReasonNotConfigured, metav1.ConditionTrue)
 	if plans := listStoragePlans(t, r); len(plans) != 0 {
@@ -129,11 +131,11 @@ func TestStoragePlansFromPredecessorAreDeleted(t *testing.T) {
 	r, m := planningFixture(t)
 	ctx := context.Background()
 	predecessor := &migrationv1alpha1.StorageWorkloadMigration{
-		ObjectMeta: metav1.ObjectMeta{Name: "vcf-storage-old", Namespace: "old", Labels: map[string]string{migrationUIDLabel: "old-uid"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "vcf-storage-old", Namespace: "old", Labels: map[string]string{storage.MigrationUIDLabel: "old-uid"}},
 		Spec:       migrationv1alpha1.StorageWorkloadMigrationSpec{MigrationRef: migrationv1alpha1.MigrationObjectReference{Name: m.Name, UID: "old-uid"}},
 	}
 	foreign := &migrationv1alpha1.StorageWorkloadMigration{
-		ObjectMeta: metav1.ObjectMeta{Name: "foreign", Namespace: "old", Labels: map[string]string{migrationUIDLabel: "other-uid"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "foreign", Namespace: "old", Labels: map[string]string{storage.MigrationUIDLabel: "other-uid"}},
 		Spec:       migrationv1alpha1.StorageWorkloadMigrationSpec{MigrationRef: migrationv1alpha1.MigrationObjectReference{Name: m.Name, UID: "old-uid"}},
 	}
 	for _, swm := range []*migrationv1alpha1.StorageWorkloadMigration{predecessor, foreign} {
@@ -185,7 +187,7 @@ func completeMigration(t *testing.T, r *VmwareCloudFoundationMigrationReconciler
 		t.Fatal(err)
 	}
 	for _, condition := range conditionOrder {
-		r.setCondition(m, condition, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "done")
+		util.SetCondition(m, condition, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "done")
 	}
 	now := metav1.Now()
 	m.Status.StartTime = &now
@@ -230,101 +232,5 @@ func TestStatusKeepsCompletedReadyOverSameGenerationRejection(t *testing.T) {
 	paused := metav1.Condition{Type: migrationv1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: migrationv1alpha1.ReasonPaused, ObservedGeneration: 3}
 	if isReadyRejectionOfNewerSpec(paused, existing) {
 		t.Fatal("isReadyRejectionOfNewerSpec(Paused) = true, want false")
-	}
-}
-
-func TestPVCEventsEnqueueOnlyWhileStoragePlanRefreshes(t *testing.T) {
-	ctx := context.Background()
-	for _, tt := range []struct {
-		name    string
-		change  func(*migrationv1alpha1.VmwareCloudFoundationMigration)
-		enqueue bool
-	}{
-		{name: "planning with storage", change: func(*migrationv1alpha1.VmwareCloudFoundationMigration) {}, enqueue: true},
-		{name: "running with storage", change: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
-			m.Spec.State = migrationv1alpha1.MigrationStateRunning
-		}, enqueue: true},
-		{name: "storage disabled", change: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
-			m.Spec.MigrateStorage = false
-			m.Spec.Storage = nil
-		}},
-		{name: "paused", change: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
-			m.Spec.State = migrationv1alpha1.MigrationStatePaused
-		}},
-		{name: "started", change: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
-			now := metav1.Now()
-			m.Status.StartTime = &now
-		}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			r, m := planningFixture(t)
-			tt.change(m)
-			if err := r.Update(ctx, m); err != nil {
-				t.Fatal(err)
-			}
-			// Update returns the stored status, so reapply status changes.
-			tt.change(m)
-			if err := r.Status().Update(ctx, m); err != nil {
-				t.Fatal(err)
-			}
-			got := r.mapPVCToStoragePlanning(ctx, &metav1.PartialObjectMetadata{})
-			if (len(got) == 1) != tt.enqueue {
-				t.Fatalf("mapPVCToStoragePlanning = %+v, want enqueue %v", got, tt.enqueue)
-			}
-		})
-	}
-
-	r, m := planningFixture(t)
-	if err := r.Delete(ctx, m); err != nil {
-		t.Fatal(err)
-	}
-	// Remove the finalizer so the object is gone rather than terminating.
-	latest := &migrationv1alpha1.VmwareCloudFoundationMigration{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(m), latest); err != nil {
-		t.Fatal(err)
-	}
-	latest.Finalizers = nil
-	if err := r.Update(ctx, latest); err != nil {
-		t.Fatal(err)
-	}
-	if got := r.mapPVCToStoragePlanning(ctx, &metav1.PartialObjectMetadata{}); len(got) != 0 {
-		t.Fatalf("mapPVCToStoragePlanning without a migration = %+v, want none", got)
-	}
-}
-
-func TestPVCMetadataChanged(t *testing.T) {
-	base := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
-		Name: "data", Namespace: "app", ResourceVersion: "1",
-		Annotations: map[string]string{"a": "b"},
-	}}
-	for _, tt := range []struct {
-		name    string
-		change  func(*metav1.PartialObjectMetadata)
-		changed bool
-	}{
-		{name: "resource version only", change: func(p *metav1.PartialObjectMetadata) { p.ResourceVersion = "2" }},
-		{name: "managed fields only", change: func(p *metav1.PartialObjectMetadata) {
-			p.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "kubelet"}}
-		}},
-		{name: "labels only", change: func(p *metav1.PartialObjectMetadata) { p.Labels = map[string]string{"x": "y"} }},
-		{name: "target annotation", change: func(p *metav1.PartialObjectMetadata) {
-			p.Annotations[storageplan.TargetFailureDomainAnnotation] = "override"
-		}, changed: true},
-		{name: "owner references", change: func(p *metav1.PartialObjectMetadata) {
-			p.OwnerReferences = []metav1.OwnerReference{{Kind: "Pod", Name: "pod"}}
-		}, changed: true},
-		{name: "deletion", change: func(p *metav1.PartialObjectMetadata) {
-			now := metav1.Now()
-			p.DeletionTimestamp = &now
-		}, changed: true},
-		{name: "generation", change: func(p *metav1.PartialObjectMetadata) { p.Generation = 2 }, changed: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			updated := base.DeepCopy()
-			tt.change(updated)
-			if got := isPVCMetadataChanged(base, updated); got != tt.changed {
-				t.Fatalf("isPVCMetadataChanged = %v, want %v", got, tt.changed)
-			}
-		})
 	}
 }

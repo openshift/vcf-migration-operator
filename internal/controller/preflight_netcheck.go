@@ -16,6 +16,7 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 )
 
@@ -105,7 +106,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 		if err != nil {
 			return fmt.Errorf("getting source vCenter credentials for %s: %w", sourceVC.Server, err)
 		}
-		sourceSession, err = getVSphereSession(ctx, sourceVC.Server, sourceVC.Datacenters[0], sourceUser, sourcePass)
+		sourceSession, err = util.GetVSphereSession(ctx, sourceVC.Server, sourceVC.Datacenters[0], sourceUser, sourcePass)
 		if err != nil {
 			return fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
 		}
@@ -135,13 +136,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 	var mismatches []string
 	for i := range migration.Spec.FailureDomains {
 		fd := &migration.Spec.FailureDomains[i]
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, fmt.Sprintf("Checking networking for failure domain %q", fd.Name))
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, fmt.Sprintf("Checking networking for failure domain %q", fd.Name))
 
 		var session *vsphere.Session
 		if err := runPreflightStep(log, "target vCenter probe session", func() error {
 			creds, ok := targetCreds[fd.Server]
 			if !ok {
-				username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
+				username, password, err := util.GetTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
 				if err != nil {
 					return fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
 				}
@@ -149,7 +150,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 				targetCreds[fd.Server] = creds
 			}
 			var err error
-			session, err = getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
+			session, err = util.GetVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
 			if err != nil {
 				return fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
 			}

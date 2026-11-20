@@ -13,7 +13,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -31,22 +30,12 @@ const vsphereCSIDriverName = "csi.vsphere.vmware.com"
 // status.workerMachineSetNames, so creation never exceeds what status accepts.
 const maxDestinationWorkerMachineSets = 256
 
-// Management states for the spec.managementState field read from ClusterCSIDriver
-// and Storage operators during preflight.
-const (
-	// managementStateRemoved indicates the operator is removed and inert.
-	managementStateRemoved = "Removed"
-	// managementStateUnmanaged indicates the operator no longer manages the platform.
-	managementStateUnmanaged = "Unmanaged"
-)
 const preflightVSphereTimeout = 2 * time.Minute
 
 var (
 	machineHealthCheckGVR = schema.GroupVersionResource{Group: "machine.openshift.io", Version: "v1beta1", Resource: "machinehealthchecks"}
 	clusterAutoscalerGVR  = schema.GroupVersionResource{Group: "autoscaling.openshift.io", Version: "v1", Resource: "clusterautoscalers"}
 	machineAutoscalerGVR  = schema.GroupVersionResource{Group: "autoscaling.openshift.io", Version: "v1beta1", Resource: "machineautoscalers"}
-	clusterCSIDriverGVR   = schema.GroupVersionResource{Group: "operator.openshift.io", Version: "v1", Resource: "clustercsidrivers"}
-	storageOperatorGVR    = schema.GroupVersionResource{Group: "operator.openshift.io", Version: "v1", Resource: "storages"}
 )
 
 // platformMachineHealthChecks lists MHCs that do not interfere with cross-vCenter migration.
@@ -161,7 +150,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) validateDestinationMachineSet
 
 	count := 0
 	for i := range mappings {
-		source := findFailureDomainByName(sourceFDs, mappings[i].Source)
+		source := util.FindFailureDomainByName(sourceFDs, mappings[i].Source)
 		if source == nil {
 			return fmt.Errorf("resolving source failure domain %q", mappings[i].Source)
 		}
@@ -231,7 +220,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		if !support.FeatureGateEnabled {
 			return fmt.Errorf("feature gate VSphereMultiVCenterDay2 is not enabled for OpenShift %s; enable the feature gate before starting migration", support.ClusterVersion)
 		}
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Validating cluster readiness")
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Validating cluster readiness")
 		if support.UpgradeInProgress {
 			return newTransientError(fmt.Errorf("cluster upgrade is in progress; wait for ClusterVersion/version Progressing=False before starting migration"))
 		}
@@ -265,7 +254,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	var storageWarning string
 	if err := runPreflightStep(log, "storage management state", func() error {
 		var err error
-		storageWarning, err = checkStorageManagementForPlan(ctx, r.DynamicClient, migration.Spec.MigrateStorage)
+		storageWarning, err = r.StorageController.CheckStorageManagement(ctx, migration.Spec.MigrateStorage)
 		return err
 	}); err != nil {
 		return "", err
@@ -347,7 +336,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx 
 		if len(sourceVC.Datacenters) > 1 {
 			return fmt.Errorf("source vCenter must have exactly one datacenter configured, found %d", len(sourceVC.Datacenters))
 		}
-		srcSession, err := getVSphereSession(vsphereCtx, sourceVC.Server, sourceVC.Datacenters[0], srcUser, srcPass)
+		srcSession, err := util.GetVSphereSession(vsphereCtx, sourceVC.Server, sourceVC.Datacenters[0], srcUser, srcPass)
 		if err != nil {
 			return fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
 		}
@@ -363,12 +352,12 @@ func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx 
 
 	for i := range migration.Spec.FailureDomains {
 		fd := &migration.Spec.FailureDomains[i]
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, fmt.Sprintf("Validating target failure domain %q", fd.Name))
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, fmt.Sprintf("Validating target failure domain %q", fd.Name))
 
 		if err := runPreflightStep(log, "target failure domain topology", func() error {
 			creds, ok := targetCredentialsByServer[fd.Server]
 			if !ok {
-				username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
+				username, password, err := util.GetTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
 				if err != nil {
 					return fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
 				}
@@ -385,7 +374,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx 
 }
 
 func validateFailureDomain(ctx context.Context, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
-	session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
+	session, err := util.GetVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
 	if err != nil {
 		return fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
 	}
@@ -486,47 +475,6 @@ func checkNoVSphereCSIPersistentVolumes(ctx context.Context, kubeClient kubernet
 
 	sort.Strings(blocked)
 	return fmt.Errorf("vSphere CSI-backed persistent volumes block migration; set spec.migrateStorage to true or remove PersistentVolumes using driver %q: %s", vsphereCSIDriverName, strings.Join(blocked, ", "))
-}
-
-func checkVSphereStorageManagement(ctx context.Context, dynamicClient dynamic.Interface) (string, error) {
-	log := klog.FromContext(ctx)
-
-	csiState, err := getManagementState(ctx, dynamicClient, clusterCSIDriverGVR, vsphereCSIDriverName)
-	if err != nil {
-		return "", fmt.Errorf("vSphere CSI driver is not supported for migration; unable to read ClusterCSIDriver/%s: %w", vsphereCSIDriverName, err)
-	}
-	log.V(1).Info("checked vSphere CSI driver management state", "clusterCSIDriver", vsphereCSIDriverName, "managementState", csiState)
-	if csiState != managementStateRemoved {
-		return "", fmt.Errorf("vSphere CSI driver is not supported for migration; set ClusterCSIDriver/%s spec.managementState to Removed (current: %s)", vsphereCSIDriverName, csiState)
-	}
-
-	storageState, err := getManagementState(ctx, dynamicClient, storageOperatorGVR, "cluster")
-	if err != nil {
-		log.V(1).Info("unable to read Storage/cluster management state", "error", err)
-		return "unable to read Storage/cluster managementState; consider setting Unmanaged or Removed (only ClusterCSIDriver Removed is required)", nil
-	}
-	log.V(1).Info("checked Storage operator management state", "storage", "cluster", "managementState", storageState)
-	switch storageState {
-	case managementStateUnmanaged, managementStateRemoved:
-		return "", nil
-	default:
-		return fmt.Sprintf("Storage/cluster managementState is %s; consider setting Unmanaged or Removed (only ClusterCSIDriver Removed is required)", storageState), nil
-	}
-}
-
-func getManagementState(ctx context.Context, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, name string) (string, error) {
-	obj, err := dynamicClient.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return "", err
-	}
-	state, found, err := unstructured.NestedString(obj.Object, "spec", "managementState")
-	if err != nil {
-		return "", fmt.Errorf("reading spec.managementState: %w", err)
-	}
-	if !found || state == "" {
-		return "", fmt.Errorf("spec.managementState not set")
-	}
-	return state, nil
 }
 
 func checkInterferingRolloutResources(ctx context.Context, dynamicClient dynamic.Interface) error {

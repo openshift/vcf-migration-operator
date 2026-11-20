@@ -32,6 +32,7 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 )
 
@@ -297,7 +298,7 @@ func (e *netcheckTestEnv) seedGuest(t *testing.T, ref types.ManagedObjectReferen
 // seedProbeGuestWhenUp only targets the fresh FD probe.
 func (e *netcheckTestEnv) createStaleProbe(t *testing.T) {
 	t.Helper()
-	session, err := getVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
+	session, err := util.GetVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
 	if err != nil {
 		t.Fatalf("creating session for stale probe: %v", err)
 	}
@@ -648,7 +649,7 @@ func TestCollectSourceNetworks(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		e := newNetcheckTestEnv(t)
 		r := e.newReconciler(t, []string{netcheckNodeName})
-		sourceSession, err := getVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
+		sourceSession, err := util.GetVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
 		if err != nil {
 			t.Fatalf("creating source session: %v", err)
 		}
@@ -672,7 +673,7 @@ func TestCollectSourceNetworks(t *testing.T) {
 			KubeClient:   kubeClient,
 			Recorder:     events.NewFakeRecorder(20),
 		}
-		sourceSession, err := getVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
+		sourceSession, err := util.GetVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
 		if err != nil {
 			t.Fatalf("creating source session: %v", err)
 		}
@@ -683,7 +684,7 @@ func TestCollectSourceNetworks(t *testing.T) {
 	t.Run("node VM missing", func(t *testing.T) {
 		e := newNetcheckTestEnv(t)
 		r := e.newReconciler(t, []string{"node-missing"})
-		sourceSession, err := getVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
+		sourceSession, err := util.GetVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
 		if err != nil {
 			t.Fatalf("creating source session: %v", err)
 		}
@@ -696,7 +697,7 @@ func TestCollectSourceNetworks(t *testing.T) {
 		e.renameVM(t, "DC0_H0_VM1", "node-nonetwork")
 		e.seedVMGuest(t, "node-nonetwork", noNetworkGuest())
 		r := e.newReconciler(t, []string{"node-nonetwork"})
-		sourceSession, err := getVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
+		sourceSession, err := util.GetVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
 		if err != nil {
 			t.Fatalf("creating source session: %v", err)
 		}

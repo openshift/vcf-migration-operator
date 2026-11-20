@@ -29,6 +29,7 @@ import (
 	machineconfigfake "github.com/openshift/client-go/machineconfiguration/clientset/versioned/fake"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 )
 
@@ -59,11 +60,12 @@ func reconcileErrReconciler(t *testing.T, objs ...client.Object) (*VmwareCloudFo
 		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
 		Build()
 	r := &VmwareCloudFoundationMigrationReconciler{
-		Client:        c,
-		ConfigClient:  configfake.NewClientset(),
-		KubeClient:    fakekube.NewClientset(),
-		MachineClient: machinefake.NewSimpleClientset(),
-		Recorder:      events.NewFakeRecorder(50),
+		Client:            c,
+		ConfigClient:      configfake.NewClientset(),
+		KubeClient:        fakekube.NewClientset(),
+		MachineClient:     machinefake.NewSimpleClientset(),
+		Recorder:          events.NewFakeRecorder(50),
+		StorageController: &storage.StorageController{Client: c},
 	}
 	return r, c
 }
@@ -532,10 +534,11 @@ func TestEnsureInfrastructurePreparedAlreadyReady(t *testing.T) {
 	)
 	rec := events.NewFakeRecorder(10)
 	r := &VmwareCloudFoundationMigrationReconciler{
-		KubeClient:    kube,
-		ConfigClient:  cfg,
-		DynamicClient: dyn,
-		MachineClient: machinefake.NewSimpleClientset(),
+		KubeClient:        kube,
+		ConfigClient:      cfg,
+		DynamicClient:     dyn,
+		StorageController: &storage.StorageController{DynamicClient: dyn},
+		MachineClient:     machinefake.NewSimpleClientset(),
 		checkNetworkingViaProbeVMsFunc: func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration, *configv1.VSpherePlatformVCenterSpec) error {
 			return nil
 		},
@@ -564,6 +567,10 @@ func TestSetupWithManager(t *testing.T) {
 		t.Fatalf("manager.New: %v", err)
 	}
 	r := &VmwareCloudFoundationMigrationReconciler{Client: mgr.GetClient(), Scheme: s, KubeClient: fakekube.NewClientset()}
+	if err := r.SetupWithManager(mgr); err == nil || !strings.Contains(err.Error(), "storage controller is required") {
+		t.Fatalf("SetupWithManager without storage controller: got %v, want missing dependency error", err)
+	}
+	r.StorageController = &storage.StorageController{Client: mgr.GetClient()}
 	if err := r.SetupWithManager(mgr); err != nil {
 		t.Fatalf("SetupWithManager: %v", err)
 	}

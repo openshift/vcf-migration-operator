@@ -26,7 +26,9 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 )
 
@@ -61,12 +63,13 @@ func preflightReconciler(t *testing.T, e *netcheckTestEnv, migration *migrationv
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynScheme, preflightListKinds(), objs...)
 
 	return &VmwareCloudFoundationMigrationReconciler{
-		Client:        client,
-		ConfigClient:  configfake.NewClientset(infra, newClusterVersionForPreflight("4.18.0", false), newFeatureGateForPreflight("4.18.0", true)),
-		KubeClient:    fakekube.NewClientset(kubeObjects...),
-		MachineClient: machinefake.NewSimpleClientset(machineObjs...),
-		DynamicClient: dyn,
-		Recorder:      events.NewFakeRecorder(20),
+		Client:            client,
+		ConfigClient:      configfake.NewClientset(infra, newClusterVersionForPreflight("4.18.0", false), newFeatureGateForPreflight("4.18.0", true)),
+		KubeClient:        fakekube.NewClientset(kubeObjects...),
+		MachineClient:     machinefake.NewSimpleClientset(machineObjs...),
+		DynamicClient:     dyn,
+		StorageController: &storage.StorageController{DynamicClient: dyn},
+		Recorder:          events.NewFakeRecorder(20),
 	}
 }
 
@@ -90,7 +93,7 @@ func machineClientset(t *testing.T, r *VmwareCloudFoundationMigrationReconciler)
 
 func (e *netcheckTestEnv) preflightSession(t *testing.T) *vsphere.Session {
 	t.Helper()
-	session, err := getVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
+	session, err := util.GetVSphereSession(e.ctx, e.host, e.dcName, e.user, e.pass)
 	if err != nil {
 		t.Fatalf("creating preflight session: %v", err)
 	}
@@ -269,7 +272,8 @@ func TestPreflightGetManagementState(t *testing.T) {
 		dyn.PrependReactor("get", "clustercsidrivers", func(action ktesting.Action) (bool, runtime.Object, error) {
 			return true, nil, context.DeadlineExceeded
 		})
-		_, err := getManagementState(e.ctx, dyn, clusterCSIDriverGVR, vsphereCSIDriverName)
+		storageController := &storage.StorageController{DynamicClient: dyn}
+		_, err := storageController.CheckStorageManagement(e.ctx, true /* migrateStorage */)
 		if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
 			t.Fatalf("err = %v, want raw get error", err)
 		}
@@ -279,7 +283,8 @@ func TestPreflightGetManagementState(t *testing.T) {
 		csiDriver := newUnstructuredResource("operator.openshift.io/v1", "ClusterCSIDriver", "", vsphereCSIDriverName)
 		dynScheme := runtime.NewScheme()
 		dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynScheme, preflightListKinds(), csiDriver)
-		_, err := getManagementState(e.ctx, dyn, clusterCSIDriverGVR, vsphereCSIDriverName)
+		storageController := &storage.StorageController{DynamicClient: dyn}
+		_, err := storageController.CheckStorageManagement(e.ctx, true /* migrateStorage */)
 		if err == nil || !strings.Contains(err.Error(), "spec.managementState not set") {
 			t.Fatalf("err = %v, want not-set error", err)
 		}
@@ -384,7 +389,8 @@ func TestPreflightCheckVSphereStorageManagement(t *testing.T) {
 		dyn.PrependReactor("get", "clustercsidrivers", func(action ktesting.Action) (bool, runtime.Object, error) {
 			return true, nil, context.DeadlineExceeded
 		})
-		if _, err := checkVSphereStorageManagement(e.ctx, dyn); err == nil || !strings.Contains(err.Error(), "unable to read ClusterCSIDriver") {
+		storageController := &storage.StorageController{DynamicClient: dyn}
+		if _, err := storageController.CheckStorageManagement(e.ctx, false /* migrateStorage */); err == nil || !strings.Contains(err.Error(), "unable to read ClusterCSIDriver") {
 			t.Fatalf("err = %v, want csi state get error", err)
 		}
 	})
@@ -395,7 +401,8 @@ func TestPreflightCheckVSphereStorageManagement(t *testing.T) {
 			newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Managed"),
 			newManagementStateResource("Storage", "cluster", "Removed"),
 		)
-		if _, err := checkVSphereStorageManagement(e.ctx, dyn); err == nil || !strings.Contains(err.Error(), "vSphere CSI driver is not supported for migration; set ClusterCSIDriver") {
+		storageController := &storage.StorageController{DynamicClient: dyn}
+		if _, err := storageController.CheckStorageManagement(e.ctx, false /* migrateStorage */); err == nil || !strings.Contains(err.Error(), "vSphere CSI driver is not supported for migration; set ClusterCSIDriver") {
 			t.Fatalf("err = %v, want csi-not-removed error", err)
 		}
 	})
@@ -410,7 +417,8 @@ func TestPreflightCheckVSphereStorageManagement(t *testing.T) {
 		})
 		// The storage-operator read failure is non-fatal: it returns a warning
 		// message with a nil error.
-		msg, err := checkVSphereStorageManagement(e.ctx, dyn)
+		storageController := &storage.StorageController{DynamicClient: dyn}
+		msg, err := storageController.CheckStorageManagement(e.ctx, false /* migrateStorage */)
 		if err != nil {
 			t.Fatalf("err = %v, want nil (storage read failure is a warning)", err)
 		}
