@@ -32,7 +32,6 @@ import (
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
 	machineconfigclient "github.com/openshift/client-go/machineconfiguration/clientset/versioned"
 	"github.com/vmware/govmomi/find"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,18 +43,18 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/execution"
 	"github.com/openshift/vcf-migration-operator/internal/metadata"
 	"github.com/openshift/vcf-migration-operator/internal/metrics"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 )
 
@@ -74,6 +73,9 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	MachineConfigClient machineconfigclient.Interface
 	DynamicClient       dynamic.Interface
 	Recorder            events.EventRecorder
+	// StorageController handles storage migration planning and plan lifecycle.
+	// It must be provided before registering the reconciler.
+	StorageController storage.Controller
 
 	// checkNetworkingViaProbeVMsFunc overrides the probe-VM networking check in
 	// tests; nil selects the real implementation.
@@ -146,11 +148,7 @@ const readyStabilityCheckGap = 90 * time.Second
 // matches the 30s requeue cadence of the readiness gate.
 const readyStabilityObservationInterval = 30 * time.Second
 
-const (
-	maxConditionMessageBytes  = 32768
-	maxEventNoteBytes         = 1024
-	oldWorkerStallEventPrefix = "Old worker deletion stalled: "
-)
+const oldWorkerStallEventPrefix = "Old worker deletion stalled: "
 
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations/status,verbs=get;update;patch
@@ -214,7 +212,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 			reason = migrationv1alpha1.ReasonUnsupportedNamespace
 			message = fmt.Sprintf("only a VmwareCloudFoundationMigration in namespace %q is reconciled by this operator", migrationv1alpha1.SingletonNamespace)
 		}
-		if r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, reason, message) {
+		if util.SetCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, reason, message) {
 			log.Info(message, "expectedName", migrationv1alpha1.SingletonName, "actualName", migration.Name, "expectedNamespace", migrationv1alpha1.SingletonNamespace, "actualNamespace", migration.Namespace)
 			r.Recorder.Eventf(migration, nil, "Warning", reason, reason, "%s", message)
 			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
@@ -247,7 +245,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		if complete || adminAllowed {
 			// StorageWorkloadMigrations live in workload namespaces and cannot be
 			// owned by this namespaced object, so release them explicitly.
-			if err := r.deleteStaleStoragePlans(ctx, migration, nil); err != nil {
+			if err := r.StorageController.DeleteStaleStoragePlans(ctx, migration, nil /* plan */); err != nil {
 				return ctrl.Result{}, fmt.Errorf("releasing storage plans: %w", err)
 			}
 			if err := r.updateRetentionFinalizer(ctx, migration); err != nil {
@@ -258,7 +256,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		}
 
 		message := fmt.Sprintf("deletion is blocked until the migration completes or an administrator sets the annotation %s=\"true\"", migrationv1alpha1.AnnotationAllowDeletion)
-		if r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonDeletionBlocked, message) {
+		if util.SetCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonDeletionBlocked, message) {
 			log.Info("retaining deleted migration record while work is outstanding")
 			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonDeletionBlocked, migrationv1alpha1.ReasonDeletionBlocked, "%s", message)
 			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
@@ -279,7 +277,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runStateGuard(ctx context.Con
 	state := migration.Spec.State
 
 	if isMigrationResetAfterStart(migration) {
-		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanningAfterStart, "To start migration; set spec.state to Running")
+		util.SetCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanningAfterStart, "To start migration; set spec.state to Running")
 		return true, r.updateStatus(ctx, migration, baseStatus)
 	}
 
@@ -288,7 +286,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runStateGuard(ctx context.Con
 
 		if migration.Spec.State == migrationv1alpha1.MigrationStatePaused {
 			msg := fmt.Sprintf("Migration is paused; set spec.state to %s to resume", migrationv1alpha1.MigrationStateRunning)
-			changed := r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPaused, msg)
+			changed := util.SetCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPaused, msg)
 			if changed && r.Recorder != nil {
 				r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ReasonPaused, migrationv1alpha1.ReasonPaused, "%s", msg)
 			}
@@ -300,7 +298,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runStateGuard(ctx context.Con
 	}
 
 	if state == migrationv1alpha1.MigrationStatePlanning {
-		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanning, "Running non-disruptive migration checks")
+		util.SetCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanning, "Running non-disruptive migration checks")
 	}
 
 	// Clear the planning or pause message when entering Running.
@@ -311,11 +309,37 @@ func (r *VmwareCloudFoundationMigrationReconciler) runStateGuard(ctx context.Con
 		keepPlanBlocked := cond.Reason == migrationv1alpha1.ReasonPlanBlocked && cond.ObservedGeneration == migration.Generation
 		if !keepPlanBlocked {
 			log.V(1).Info("migration entering Running state, updating Ready condition")
-			r.setReadyRunning(migration)
+			util.SetReadyRunning(migration, r.Recorder)
 		}
 	}
 
 	return false, nil
+}
+
+func isPlanningOrPausedReason(reason string) bool {
+	switch reason {
+	case migrationv1alpha1.ReasonPaused, migrationv1alpha1.ReasonPlanning, migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning, migrationv1alpha1.ReasonPlanBlocked, migrationv1alpha1.ReasonPlanningAfterStart:
+		return true
+	default:
+		return false
+	}
+}
+
+func isPlanningCondition(condition string) bool {
+	return condition == migrationv1alpha1.ConditionInfrastructurePrepared || condition == migrationv1alpha1.ConditionStoragePlanned
+}
+
+// isConditionComplete requires the named condition to be True. Before execution
+// starts, planning conditions must also reflect the current migration generation.
+func isConditionComplete(m *migrationv1alpha1.VmwareCloudFoundationMigration, conditionType string) bool {
+	c := apimeta.FindStatusCondition(m.Status.Conditions, conditionType)
+	if c == nil || c.Status != metav1.ConditionTrue {
+		return false
+	}
+	if isPlanningCondition(conditionType) && m.Status.StartTime == nil {
+		return c.ObservedGeneration == m.Generation
+	}
+	return true
 }
 
 func isMigrationResetAfterStart(migration *migrationv1alpha1.VmwareCloudFoundationMigration) bool {
@@ -357,11 +381,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 		return r.reconcileVMotionWorkflow(ctx, migration, baseStatus, state)
 	}
 
+	storageCtrl := r.StorageController
+
 	// Walk conditions in order; execute work for the first non-True condition.
 	type conditionHandler func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error)
 	handlers := map[string]conditionHandler{
 		migrationv1alpha1.ConditionInfrastructurePrepared: r.ensureInfrastructurePrepared,
-		migrationv1alpha1.ConditionStoragePlanned:         r.ensureStoragePlanned,
+		migrationv1alpha1.ConditionStoragePlanned:         storageCtrl.EnsureStoragePlanned,
 		migrationv1alpha1.ConditionDestinationInitialized: r.ensureDestinationInitialized,
 		migrationv1alpha1.ConditionMultiSiteConfigured:    r.ensureMultiSiteConfigured,
 		migrationv1alpha1.ConditionWorkloadMigrated:       r.ensureWorkloadMigrated,
@@ -377,16 +403,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 	ctx = r.stateContext(ctx, migration, state)
 
 	for _, condType := range conditionOrder {
+		if !isPlanningCondition(condType) {
+			if state == migrationv1alpha1.MigrationStatePlanning {
+				util.SetCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning, "Plan has no blockers; set spec.state to Running to start")
+				return ctrl.Result{RequeueAfter: storage.PlanningResync}, r.updateStatus(ctx, migration, baseStatus)
+			}
 
-		if state == migrationv1alpha1.MigrationStatePlanning && !isPlanningCondition(condType) {
-			r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning, "Plan has no blockers; set spec.state to Running to start")
-			return ctrl.Result{RequeueAfter: planningResync}, r.updateStatus(ctx, migration, baseStatus)
-		}
-
-		// Check before skipping completed conditions: storage enabled on a
-		// started or completed migration must not fall through to completion.
-		if r.blockUnsupportedStorageExecution(migration, condType) {
-			return ctrl.Result{RequeueAfter: planningResync}, r.updateStatus(ctx, migration, baseStatus)
+			// Check before skipping completed conditions: storage enabled on a
+			// started or completed migration must not fall through to completion.
+			if storageCtrl.BlockUnsupportedStorageMigration(migration) {
+				return ctrl.Result{RequeueAfter: storage.PlanningResync}, r.updateStatus(ctx, migration, baseStatus)
+			}
 		}
 
 		// skip the current handler of condition for now if it is already complete
@@ -395,8 +422,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 
 		// Keep refreshing enabled storage plans until execution starts, even
 		// when StoragePlanned is already True: PVC inventory may have changed.
-		if condType == migrationv1alpha1.ConditionStoragePlanned &&
-			migration.Spec.MigrateStorage && migration.Status.StartTime == nil {
+		if condType == migrationv1alpha1.ConditionStoragePlanned && storageCtrl.ShouldRefreshPlan(migration) {
 			skipCondition = false
 		}
 		if skipCondition {
@@ -431,7 +457,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 		}
 		if err != nil {
 			log.Error(err, "condition processing failed", "condition", condType)
-			r.setCondition(migration, condType, metav1.ConditionFalse, reasonForError(err), err.Error())
+			util.SetCondition(migration, condType, metav1.ConditionFalse, reasonForError(err), err.Error())
 			r.Recorder.Eventf(migration, nil, "Warning", "ConditionFailed", "ConditionFailed", "Condition %s failed: %v", condType, err)
 		}
 
@@ -468,13 +494,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 func (r *VmwareCloudFoundationMigrationReconciler) ensureInfrastructurePrepared(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
 
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Validating preflight checks")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Validating preflight checks")
 	message, err := r.runPreflightChecks(ctx, migration)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, message)
+	util.SetCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, message)
 	r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ConditionInfrastructurePrepared, migrationv1alpha1.ConditionInfrastructurePrepared, "Preflight validation passed")
 	return ctrl.Result{}, nil
 }
@@ -484,7 +510,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionDestinationInitialized
 
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Initializing destination vCenter")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Initializing destination vCenter")
 
 	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	infraID, err := infraMgr.GetInfrastructureID(ctx)
@@ -514,12 +540,12 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 			tagValue:   fd.Zone,
 		}
 
-		username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
+		username, password, err := util.GetTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("getting credentials for %s: %w", fd.Server, err)
 		}
 
-		session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, username, password)
+		session, err := util.GetVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, username, password)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("connecting to %s/%s: %w", fd.Server, fd.Topology.Datacenter, err)
 		}
@@ -582,7 +608,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 		}
 
 		// Create and attach only tags that are missing.
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			fmt.Sprintf("Creating tags for failure domain %q", fd.Name))
 
 		var regionTagID, zoneTagID string
@@ -620,7 +646,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 		log.V(1).Info("failure domain initialized", "name", fd.Name)
 	}
 
-	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Destination vCenter initialized with folders and tags")
+	util.SetCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Destination vCenter initialized with folders and tags")
 	r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ConditionDestinationInitialized, migrationv1alpha1.ConditionDestinationInitialized, "VM folders and tags created on target vCenter")
 	return ctrl.Result{}, nil
 }
@@ -668,7 +694,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureFolderAndOwnership(
 		}
 	}
 
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 		fmt.Sprintf("Creating VM folder %q on %s/%s", infraID, fd.Server, fd.Topology.Datacenter))
 
 	folder, err := vsphere.CreateVMFolder(ctx, session, infraID)
@@ -683,7 +709,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureFolderAndOwnership(
 		log.V(1).Info("created VM folder", "path", folder.InventoryPath)
 	}
 
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 		fmt.Sprintf("Creating cluster ownership tag for %q on %s", infraID, fd.Server))
 	ownershipTagID, err := vsphere.EnsureClusterOwnershipTag(ctx, session, infraID)
 	if err != nil {
@@ -715,7 +741,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMultiSiteConfigured(ctx
 	}
 
 	if !waitingForPods {
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Configuring multi-site vCenter")
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Configuring multi-site vCenter")
 
 		sm := openshift.NewSecretManager(r.KubeClient)
 
@@ -731,7 +757,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMultiSiteConfigured(ctx
 				continue
 			}
 
-			username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
+			username, password, err := util.GetTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("getting credentials for %s: %w", fd.Server, err)
 			}
@@ -744,7 +770,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMultiSiteConfigured(ctx
 		}
 		log.V(1).Info("target vCenter credentials added to vsphere-creds")
 
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Updating Infrastructure")
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Updating Infrastructure")
 		infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 		infra, err := infraMgr.Get(ctx)
 		if err != nil {
@@ -757,7 +783,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMultiSiteConfigured(ctx
 		log.V(1).Info("Infrastructure updated with target vCenter")
 
 		// Update cloud-provider-config.
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Updating cloud-provider-config")
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Updating cloud-provider-config")
 		cmMgr := openshift.NewConfigMapManager(r.KubeClient)
 		cm, err := cmMgr.GetCloudProviderConfig(ctx)
 		if err != nil {
@@ -770,25 +796,25 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMultiSiteConfigured(ctx
 		log.V(1).Info("cloud-provider-config updated")
 
 		// Restart MCO pods.
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Restarting MCO pods")
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Restarting MCO pods")
 		if err := syncControllerConfig(ctx, r.KubeClient); err != nil {
 			return ctrl.Result{}, fmt.Errorf("syncing controller config (MCO restart): %w", err)
 		}
 
 		// Restart vSphere pods.
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Restarting vSphere pods")
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Restarting vSphere pods")
 		podMgr := openshift.NewPodManager(r.KubeClient)
 		if err := podMgr.RestartVSpherePods(ctx); err != nil {
 			return ctrl.Result{}, fmt.Errorf("restarting vSphere pods: %w", err)
 		}
 
 		// Set message so next reconcile only runs readiness check.
-		r.setCondition(migration, condType, metav1.ConditionFalse, reasonWaitingForVSpherePods, "Waiting for vSphere pods to become ready")
+		util.SetCondition(migration, condType, metav1.ConditionFalse, reasonWaitingForVSpherePods, "Waiting for vSphere pods to become ready")
 		// Fall through to readiness check below (no return).
 	}
 
 	podMgr := openshift.NewPodManager(r.KubeClient)
-	r.setCondition(migration, condType, metav1.ConditionFalse, reasonWaitingForVSpherePods, "Waiting for vSphere pods to become ready")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, reasonWaitingForVSpherePods, "Waiting for vSphere pods to become ready")
 	podStatus, err := podMgr.CheckVSpherePodsReady(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking vSphere pods readiness: %w", err)
@@ -798,7 +824,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMultiSiteConfigured(ctx
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
-	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Multi-site vCenter configured and pods ready")
+	util.SetCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Multi-site vCenter configured and pods ready")
 	r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ConditionMultiSiteConfigured, migrationv1alpha1.ConditionMultiSiteConfigured, "Cluster configured for both source and target vCenters")
 	return ctrl.Result{}, nil
 }
@@ -851,7 +877,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 		// No recorded mapping means pre-mapping provenance, not proof that a source was always empty.
 		var legacyNames []string
 		for _, mapping := range mappings {
-			sourceFD := findFailureDomainByName(infraFDs, mapping.Source)
+			sourceFD := util.FindFailureDomainByName(infraFDs, mapping.Source)
 			if sourceFD == nil {
 				return ctrl.Result{}, fmt.Errorf("recovering source failure domain %q", mapping.Source)
 			}
@@ -915,7 +941,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 	// Readiness must never pass on an empty failure-domain list: destination
 	// MachineSets were recorded, so an empty list means they are gone.
 	if len(workerFDs) == 0 && len(migration.Status.WorkerMachineSetNames) > 0 {
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			"Waiting for recorded target worker MachineSets to exist")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -924,7 +950,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 		return ctrl.Result{}, err
 	}
 	if !readiness.Ready {
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			fmt.Sprintf("Waiting for target workers (machines %d/%d ready, nodes %d/%d ready)", readiness.MachinesReady, readiness.MachinesTotal, readiness.NodesReady, readiness.NodesTotal))
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -973,7 +999,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureCPMSUpdated(
 			blockers = append(blockers, fmt.Sprintf("degraded: %s", strings.Join(poolSummary.DegradedPools, ", ")))
 		}
 		log.V(1).Info("machine config pools not converged, holding CPMS update", "blockers", blockers)
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			fmt.Sprintf("Waiting for machine config pools to converge (%s)", strings.Join(blockers, ", ")))
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -989,7 +1015,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureCPMSUpdated(
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking CPMS generation: %w", err)
 	}
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 		fmt.Sprintf("Waiting for control plane rollout to start (CPMS generation %d/%d observed)", generation, observedGeneration))
 	r.Recorder.Eventf(migration, nil, "Normal", "CPMSUpdated", "CPMSUpdated", fmt.Sprintf("CPMS updated with failure domains %v", targetFDNames))
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
@@ -1036,7 +1062,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 	}
 	if !observed {
 		log.V(1).Info("CPMS generation not yet observed", "generation", generation, "observedGeneration", observedGeneration)
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			fmt.Sprintf("Waiting for control plane rollout to start (CPMS generation %d/%d observed)", generation, observedGeneration))
 		r.Recorder.Eventf(migration, nil, "Normal", eventReasonControlPlaneRollout, eventReasonControlPlaneRollout, "waiting for rollout to start (CPMS generation %d/%d observed)", generation, observedGeneration)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
@@ -1060,7 +1086,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 			message = fmt.Sprintf("Control plane rollout held by ControlPlaneMachineSet condition %s (%s); %d/%d updated, %d/%d ready",
 				rolloutStatus.HoldReason, detail, rolloutStatus.UpdatedReplicas, rolloutStatus.Replicas, rolloutStatus.ReadyReplicas, rolloutStatus.Replicas)
 		}
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, message)
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, message)
 		r.Recorder.Eventf(migration, nil, "Normal", eventReasonControlPlaneRollout, eventReasonControlPlaneRollout, "%s", message)
 		if machines, merr := machineMgr.ListControlPlaneMachines(ctx); merr != nil {
 			log.V(2).Info("listing control plane machines failed", "err", merr)
@@ -1096,7 +1122,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 			return ctrl.Result{}, fmt.Errorf("building old worker stall detail: %w", err)
 		}
 		log.V(1).Info("old worker deletion in progress", "detail", detail)
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			boundConditionMessage("Waiting for old worker deletion: "+detail))
 		if key != r.lastStallEventKey || time.Since(r.lastStallEventTime) >= stallEventInterval {
 			r.Recorder.Eventf(migration, nil, "Warning", "OldWorkersStalled", "OldWorkersStalled", eventNote)
@@ -1129,11 +1155,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 			names = append(names, ms.Name)
 		}
 		log.V(1).Info("source MachineSets still present after delete", "names", names)
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Deleting source MachineSets")
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Deleting source MachineSets")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Workload migrated to target vCenter")
+	util.SetCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Workload migrated to target vCenter")
 	r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ConditionWorkloadMigrated, migrationv1alpha1.ConditionWorkloadMigrated, "All workloads migrated to target vCenter")
 	return ctrl.Result{}, nil
 }
@@ -1195,7 +1221,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) scaleDownSourceMachineSets(ct
 	if !scaledAny {
 		return false, nil
 	}
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Old workers scaled down, waiting for deletion")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Old workers scaled down, waiting for deletion")
 	r.Recorder.Eventf(migration, nil, "Normal", "ControlPlaneRolledOut", "ControlPlaneRolledOut", "Control plane rollout complete on target vCenter")
 	r.Recorder.Eventf(migration, nil, "Normal", "OldWorkersScaledDown", "OldWorkersScaledDown", "Old worker MachineSets scaled to 0")
 	return true, nil
@@ -1277,7 +1303,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionSourceCleaned
 
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Cleaning up source vCenter")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Cleaning up source vCenter")
 
 	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	infra, err := infraMgr.Get(ctx)
@@ -1327,14 +1353,14 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	}
 
 	// Complete all vCenter list changes (Infrastructure, config, secrets, pods).
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source vCenter from Infrastructure")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source vCenter from Infrastructure")
 	if _, err := infraMgr.RemoveSourceVCenter(ctx, infra, sourceServer); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing source vCenter from infrastructure: %w", err)
 	}
 	log.V(1).Info("removed source vCenter from infrastructure", "server", sourceServer)
 
 	// Remove source from cloud-provider-config.
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source vCenter from cloud-provider-config")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source vCenter from cloud-provider-config")
 	cmMgr := openshift.NewConfigMapManager(r.KubeClient)
 	cm, err := cmMgr.GetCloudProviderConfig(ctx)
 	if err != nil {
@@ -1347,7 +1373,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	log.V(1).Info("removed source vCenter from cloud-provider-config", "server", sourceServer)
 
 	// Remove source creds from vsphere-creds.
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source credentials from vsphere-creds")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source credentials from vsphere-creds")
 	sm := openshift.NewSecretManager(r.KubeClient)
 	credsSecret, err := sm.GetVSphereCredsSecret(ctx)
 	if err != nil {
@@ -1360,14 +1386,14 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	log.V(1).Info("removed source credentials from vsphere-creds", "server", sourceServer)
 
 	// Restart vSphere pods to pick up new config.
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Restarting vSphere pods after source removal")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Restarting vSphere pods after source removal")
 	podMgr := openshift.NewPodManager(r.KubeClient)
 	if err := podMgr.RestartVSpherePods(ctx); err != nil {
 		return ctrl.Result{}, fmt.Errorf("restarting vSphere pods: %w", err)
 	}
 
 	// Generate metadata (after vCenter list is updated).
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Generating migration metadata")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Generating migration metadata")
 	infra, err = infraMgr.Get(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting infrastructure for metadata: %w", err)
@@ -1380,7 +1406,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 		if _, exists := creds[fd.Server]; exists {
 			continue
 		}
-		username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
+		username, password, err := util.GetTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
 		if err != nil {
 			// Fall back to vsphere-creds.
 			username, password, err = sm.GetCredentials(ctx, fd.Server)
@@ -1403,7 +1429,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	}
 	log.V(1).Info("metadata saved", "secret", secretName)
 
-	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Source vCenter cleaned")
+	util.SetCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Source vCenter cleaned")
 	r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ConditionSourceCleaned, migrationv1alpha1.ConditionSourceCleaned, "Source vCenter removed from cluster configuration")
 	return ctrl.Result{}, nil
 }
@@ -1474,7 +1500,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 	}
 	r.lastReadyStabilityCheck = time.Now()
 
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Verifying final cluster state")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Verifying final cluster state")
 
 	// Check all operators stable.
 	opMgr := openshift.NewOperatorManager(r.ConfigClient)
@@ -1559,7 +1585,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 			"poolsDegraded", poolSummary.DegradedPools,
 			"nonTargetVCenter", nonTargetVC,
 		)
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -1584,14 +1610,14 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 			"count", r.readyStabilityCount,
 			"threshold", readyStabilityThreshold,
 		)
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
+		util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	now := metav1.Now()
 	migration.Status.CompletionTime = &now
 
-	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Migration complete, all operators healthy and node pools converged")
+	util.SetCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Migration complete, all operators healthy and node pools converged")
 	r.Recorder.Eventf(migration, nil, "Normal", "MigrationComplete", "MigrationComplete", "Migration completed successfully")
 	return ctrl.Result{}, nil
 }
@@ -1609,42 +1635,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) resetReadyStability() {
 // messages take over; an existing condition (any status) is left untouched.
 func (r *VmwareCloudFoundationMigrationReconciler) seedReadyCondition(migration *migrationv1alpha1.VmwareCloudFoundationMigration) {
 	if apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady) == nil {
-		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Waiting for migration workflow to complete")
+		util.SetCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Waiting for migration workflow to complete")
 	}
-}
-
-// setReadyRunning marks Ready as progressing and records an event when that
-// changes the condition.
-func (r *VmwareCloudFoundationMigrationReconciler) setReadyRunning(migration *migrationv1alpha1.VmwareCloudFoundationMigration) {
-	msg := "Migration is running"
-	changed := r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
-	if changed && r.Recorder != nil {
-		r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ReasonProgressing, migrationv1alpha1.ReasonProgressing, "%s", msg)
-	}
-}
-
-// setCondition is a convenience wrapper around apimeta.SetStatusCondition. It
-// reports whether the condition's status, reason, message, or observed
-// generation changed, so callers can emit an event only on a transition.
-func (r *VmwareCloudFoundationMigrationReconciler) setCondition(migration *migrationv1alpha1.VmwareCloudFoundationMigration, conditionType string, status metav1.ConditionStatus, reason, message string) bool {
-	return apimeta.SetStatusCondition(&migration.Status.Conditions, metav1.Condition{
-		Type:               conditionType,
-		Status:             status,
-		ObservedGeneration: migration.Generation,
-		Reason:             reason,
-		Message:            message,
-	})
-}
-
-// statusConditionChanged reports whether two conditions of the same type
-// differ in any field this operator writes. It identifies which conditions a
-// reconcile actually changed relative to the status it started from.
-func statusConditionChanged(prev, next metav1.Condition) bool {
-	return prev.Status != next.Status ||
-		prev.Reason != next.Reason ||
-		prev.Message != next.Message ||
-		prev.ObservedGeneration != next.ObservedGeneration ||
-		!prev.LastTransitionTime.Equal(&next.LastTransitionTime)
 }
 
 // updateStatus persists this reconcile's status changes using optimistic
@@ -1821,7 +1813,7 @@ func mergeStatusConditions(ctx context.Context, migration, latest *migrationv1al
 		cond := migration.Status.Conditions[i]
 		// Skip conditions this reconcile did not change, so a concurrent
 		// writer's conditions survive.
-		if prev := apimeta.FindStatusCondition(baseStatus.Conditions, cond.Type); prev != nil && !statusConditionChanged(*prev, cond) {
+		if prev := apimeta.FindStatusCondition(baseStatus.Conditions, cond.Type); prev != nil && !util.StatusConditionChanged(*prev, cond) {
 			continue
 		}
 		// Skip deltas from a reconcile that started before the current
@@ -1855,12 +1847,29 @@ func mergeStatusConditions(ctx context.Context, migration, latest *migrationv1al
 			log.V(1).Info("keeping committed condition success over stale update", "condition", cond.Type)
 			continue
 		}
-		if existingCond == nil || statusConditionChanged(*existingCond, cond) {
+		if existingCond == nil || util.StatusConditionChanged(*existingCond, cond) {
 			hasChanges = true
 		}
 		apimeta.SetStatusCondition(&latest.Status.Conditions, cond)
 	}
 	return hasChanges
+}
+
+// canRefreshPlan allows a same-generation inventory change only if no newer writer
+// changed the condition since this reconcile read it, and disruption has not started.
+func canRefreshPlan(latest *migrationv1alpha1.VmwareCloudFoundationMigration, base migrationv1alpha1.VmwareCloudFoundationMigrationStatus, condition string, existing metav1.Condition) bool {
+	if condition != migrationv1alpha1.ConditionStoragePlanned {
+		return false
+	}
+	if latest.Status.StartTime != nil {
+		return false
+	}
+
+	previous := apimeta.FindStatusCondition(base.Conditions, condition)
+	if previous == nil {
+		return false
+	}
+	return !util.StatusConditionChanged(*previous, existing)
 }
 
 // isReadyRejectionOfNewerSpec reports whether cond rejects a spec generation
@@ -1990,10 +1999,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateWorkloadProgress(
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *VmwareCloudFoundationMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
-		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.mapPVCToStoragePlanning),
-			builder.OnlyMetadata, builder.WithPredicates(pvcMetadataChangedPredicate())).
+	if r.StorageController == nil {
+		return fmt.Errorf("setting up migration reconciler: storage controller is required")
+	}
+	bldr := ctrl.NewControllerManagedBy(mgr).
+		For(&migrationv1alpha1.VmwareCloudFoundationMigration{})
+	bldr = r.StorageController.SetupWatches(bldr)
+	return bldr.
 		Named("vmwarecloudfoundationmigration").
 		WithOptions(controller.Options{
 			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](5*time.Second, 5*time.Minute),
@@ -2008,17 +2020,6 @@ func failureDomainNames(fds []configv1.VSpherePlatformFailureDomainSpec) []strin
 		names[i] = fds[i].Name
 	}
 	return names
-}
-
-// findFailureDomainByName returns the failure domain with the given name, or
-// nil when absent.
-func findFailureDomainByName(fds []configv1.VSpherePlatformFailureDomainSpec, name string) *configv1.VSpherePlatformFailureDomainSpec {
-	for i := range fds {
-		if fds[i].Name == name {
-			return &fds[i]
-		}
-	}
-	return nil
 }
 
 // sanitizeRFC1123 converts s to a valid RFC 1123 subdomain label by lower-casing,
@@ -2164,7 +2165,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkMappingForReconcile(ctx 
 		if !alreadyRecorded && r.Recorder != nil {
 			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonMappingRejected, migrationv1alpha1.ReasonMappingRejected, "%s", err)
 		}
-		r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonMappingRejected, err.Error())
+		util.SetCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonMappingRejected, err.Error())
 		if statusErr := r.updateStatus(ctx, migration, baseStatus); statusErr != nil {
 			return true, statusErr
 		}
@@ -2195,7 +2196,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) targetMachineSetsExist(ctx co
 	recorded := migration.Status.WorkerMachineSetNames
 
 	for mi := range mappings {
-		fd := findFailureDomainByName(migration.Spec.FailureDomains, mappings[mi].Destination)
+		fd := util.FindFailureDomainByName(migration.Spec.FailureDomains, mappings[mi].Destination)
 		if fd == nil {
 			return false, fmt.Errorf("resolving destination failure domain %q for mapping from %q", mappings[mi].Destination, mappings[mi].Source)
 		}
@@ -2210,7 +2211,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) targetMachineSetsExist(ctx co
 		// Positional destination names stand for the source MachineSet at their
 		// index; a legacy aggregate stands for all of them at once.
 		sourceForName := make(map[string]*machinev1beta1.MachineSet)
-		sourceFD := findFailureDomainByName(infraFDs, mappings[mi].Source)
+		sourceFD := util.FindFailureDomainByName(infraFDs, mappings[mi].Source)
 		if sourceFD == nil {
 			// Source failure domain already removed: only recorded names can still
 			// be required. Nothing recorded means an in-flight migration predating
@@ -2324,11 +2325,11 @@ func planMappedWorkerMachineSets(ctx context.Context, machineMgr *openshift.Mach
 	log := klog.FromContext(ctx)
 	plans := make([]destinationMachineSetPlan, 0, len(mappings))
 	for mi := range mappings {
-		fd := findFailureDomainByName(destFDs, mappings[mi].Destination)
+		fd := util.FindFailureDomainByName(destFDs, mappings[mi].Destination)
 		if fd == nil {
 			return nil, fmt.Errorf("resolving destination failure domain %q for mapping from %q", mappings[mi].Destination, mappings[mi].Source)
 		}
-		sourceFD := findFailureDomainByName(infraFDs, mappings[mi].Source)
+		sourceFD := util.FindFailureDomainByName(infraFDs, mappings[mi].Source)
 		if sourceFD == nil {
 			return nil, fmt.Errorf("resolving source failure domain %q for mapping to %q", mappings[mi].Source, mappings[mi].Destination)
 		}
@@ -2398,7 +2399,7 @@ func planMappedWorkerMachineSets(ctx context.Context, machineMgr *openshift.Mach
 func (r *VmwareCloudFoundationMigrationReconciler) createMappedWorkerMachineSets(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, machineMgr *openshift.MachineManager, infraID string, mappings []migrationv1alpha1.FailureDomainMapping, infraFDs []configv1.VSpherePlatformFailureDomainSpec) (ctrl.Result, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionWorkloadMigrated
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Creating new worker MachineSets")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Creating new worker MachineSets")
 	createdAny := false
 	// A source MachineSet must feed exactly one destination failure domain;
 	// ambiguous source topology would otherwise duplicate its replicas.
@@ -2507,7 +2508,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) createMappedWorkerMachineSets
 	if createdAny {
 		r.Recorder.Eventf(migration, nil, "Normal", "WorkersCreated", "WorkersCreated", "New worker MachineSets created on target vCenter")
 	}
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Workers created, waiting for machines ready")
+	util.SetCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Workers created, waiting for machines ready")
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
@@ -2534,11 +2535,11 @@ func workerReadinessFailureDomains(ctx context.Context, machineMgr *openshift.Ma
 	}
 	result := make([]configv1.VSpherePlatformFailureDomainSpec, 0, len(destFDs))
 	for _, mapping := range mappings {
-		fd := findFailureDomainByName(destFDs, mapping.Destination)
+		fd := util.FindFailureDomainByName(destFDs, mapping.Destination)
 		if fd == nil {
 			return nil, fmt.Errorf("resolving destination failure domain %q", mapping.Destination)
 		}
-		source := findFailureDomainByName(sourceFDs, mapping.Source)
+		source := util.FindFailureDomainByName(sourceFDs, mapping.Source)
 		if source != nil {
 			sources, err := machineMgr.GetMachineSetsByFailureDomain(ctx, source.Server, source)
 			if err != nil {
@@ -2638,7 +2639,7 @@ func joinStallDetailParts(parts []stallDetailPart) string {
 }
 
 // boundOldWorkerStallEventNote formats a Warning event note capped at
-// maxEventNoteBytes. Full detail remains in the condition message and
+// util.MaxEventNoteBytes. Full detail remains in the condition message and
 // oldWorkerStallDetail log output; omitted machines are summarized.
 func boundOldWorkerStallEventNote(parts []stallDetailPart) string {
 	allNames := make([]string, 0)
@@ -2648,7 +2649,7 @@ func boundOldWorkerStallEventNote(parts []stallDetailPart) string {
 
 	fullDetail := joinStallDetailParts(parts)
 	note := oldWorkerStallEventPrefix + fullDetail
-	if len(note) <= maxEventNoteBytes {
+	if len(note) <= util.MaxEventNoteBytes {
 		return note
 	}
 
@@ -2659,7 +2660,7 @@ func boundOldWorkerStallEventNote(parts []stallDetailPart) string {
 		trialDetail := joinStallDetailParts(trialIncluded)
 		omitted := allNames[includedNameCount+len(part.machineNames):]
 		suffix := stallOmitSuffix(omitted)
-		if len(oldWorkerStallEventPrefix+trialDetail+suffix) <= maxEventNoteBytes {
+		if len(oldWorkerStallEventPrefix+trialDetail+suffix) <= util.MaxEventNoteBytes {
 			included = trialIncluded
 			includedNameCount += len(part.machineNames)
 			continue
@@ -2669,7 +2670,7 @@ func boundOldWorkerStallEventNote(parts []stallDetailPart) string {
 
 	detail := joinStallDetailParts(included)
 	omitted := allNames[includedNameCount:]
-	maxSuffixBytes := maxEventNoteBytes - len(oldWorkerStallEventPrefix+detail)
+	maxSuffixBytes := util.MaxEventNoteBytes - len(oldWorkerStallEventPrefix+detail)
 	return oldWorkerStallEventPrefix + detail + stallOmitSuffixFit(omitted, maxSuffixBytes)
 }
 
@@ -2685,7 +2686,7 @@ func stallOmitSuffixFit(omitted []string, maxSuffixBytes int) string {
 		return ""
 	}
 	if maxSuffixBytes <= 0 {
-		return truncateToBytes(stallOmitSuffix(omitted), maxSuffixBytes)
+		return util.TruncateToBytes(stallOmitSuffix(omitted), maxSuffixBytes)
 	}
 
 	suffix := stallOmitSuffix(omitted)
@@ -2697,7 +2698,7 @@ func stallOmitSuffixFit(omitted []string, maxSuffixBytes int) string {
 	suffixSuffix := "]"
 	available := maxSuffixBytes - len(countPrefix) - len(suffixSuffix)
 	if available <= 0 {
-		return truncateToBytes(fmt.Sprintf("; ... and %d more machine(s) omitted", len(omitted)), maxSuffixBytes)
+		return util.TruncateToBytes(fmt.Sprintf("; ... and %d more machine(s) omitted", len(omitted)), maxSuffixBytes)
 	}
 
 	names := append([]string(nil), omitted...)
@@ -2709,14 +2710,14 @@ func stallOmitSuffixFit(omitted []string, maxSuffixBytes int) string {
 		names = names[:len(names)-1]
 	}
 
-	return truncateToBytes(fmt.Sprintf("; ... and %d more machine(s) omitted", len(omitted)), maxSuffixBytes)
+	return util.TruncateToBytes(fmt.Sprintf("; ... and %d more machine(s) omitted", len(omitted)), maxSuffixBytes)
 }
 
 // boundConditionMessage ensures a condition message does not exceed
-// maxConditionMessageBytes (32768 characters), preserving the message
+// util.MaxConditionMessageBytes (32768 characters), preserving the message
 // when within the limit and truncating with an omitted machine count when exceeded.
 func boundConditionMessage(msg string) string {
-	if len(msg) <= maxConditionMessageBytes {
+	if len(msg) <= util.MaxConditionMessageBytes {
 		return msg
 	}
 
@@ -2724,9 +2725,9 @@ func boundConditionMessage(msg string) string {
 	const countPrefix = "; ... and "
 	const countSuffix = " more machine(s) omitted"
 	suffixEst := fmt.Sprintf("%s%d%s", countPrefix, totalMachines, countSuffix)
-	maxPrefixLen := maxConditionMessageBytes - len(suffixEst)
+	maxPrefixLen := util.MaxConditionMessageBytes - len(suffixEst)
 	if maxPrefixLen <= 0 {
-		return truncateToBytes(suffixEst, maxConditionMessageBytes)
+		return util.TruncateToBytes(suffixEst, util.MaxConditionMessageBytes)
 	}
 
 	prefix := msg[:maxPrefixLen]
@@ -2743,8 +2744,8 @@ func boundConditionMessage(msg string) string {
 	}
 
 	suffix := fmt.Sprintf("%s%d%s", countPrefix, omitted, countSuffix)
-	if len(prefix)+len(suffix) > maxConditionMessageBytes {
-		prefix = truncateToBytes(prefix, maxConditionMessageBytes-len(suffix))
+	if len(prefix)+len(suffix) > util.MaxConditionMessageBytes {
+		prefix = util.TruncateToBytes(prefix, util.MaxConditionMessageBytes-len(suffix))
 	}
 
 	return prefix + suffix
@@ -2781,16 +2782,6 @@ func countMachineEntries(s string) int {
 		return c
 	}
 	return strings.Count(s, ",") + 1
-}
-
-func truncateToBytes(s string, maxBytes int) string {
-	if maxBytes <= 0 {
-		return ""
-	}
-	if len(s) <= maxBytes {
-		return s
-	}
-	return s[:maxBytes]
 }
 
 // logStalledWorkerMachine logs allow-listed diagnostics for a stalled old worker

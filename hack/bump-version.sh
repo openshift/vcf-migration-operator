@@ -109,25 +109,7 @@ replace_cpe_label() {
     mv "$temporary_file" "$file"
 }
 
-read_csv_created_at() {
-    awk -F '"' '
-        /^[[:space:]]*createdAt:/ {
-            value = $2
-            count++
-        }
-        END {
-            if (count != 1) {
-                exit 1
-            }
-            print value
-        }
-    ' "$1"
-}
-
 run_bundle_generation() {
-    local csv_file=bundle/manifests/vcf-migration-operator.clusterserviceversion.yaml
-    local created_at
-    local generated_created_at
     local sdk_version
     local kustomize_version
     local installed_sdk
@@ -137,8 +119,6 @@ run_bundle_generation() {
     local operating_system
     local architecture
 
-    created_at=$(read_csv_created_at "$csv_file") ||
-        fail "expected exactly one createdAt timestamp in $csv_file"
     sdk_version=$(awk '$1 == "OPERATOR_SDK_VERSION" && $2 == "?=" { print $3 }' Makefile)
     kustomize_version=$(awk '$1 == "KUSTOMIZE_VERSION" && $2 == "?=" { print $3 }' Makefile)
 
@@ -183,12 +163,6 @@ run_bundle_generation() {
         OPERATOR_SDK="$operator_sdk" \
         OPERATOR_SDK_VERSION="$sdk_version" \
         KUSTOMIZE_VERSION="$kustomize_version"
-
-    generated_created_at=$(read_csv_created_at "$csv_file") ||
-        fail "expected exactly one generated createdAt timestamp in $csv_file"
-    if [[ "$created_at" != "$generated_created_at" ]]; then
-        replace_field "$csv_file" 'createdAt: "' '"' "$created_at" 1
-    fi
 
     [[ -z "$temp_dir" ]] || rm -rf "$temp_dir"
     trap - EXIT

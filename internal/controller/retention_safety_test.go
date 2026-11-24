@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 )
 
 func completionHashForTest(t interface {
@@ -67,7 +68,10 @@ func TestRetentionRejectsStaleCompletion(t *testing.T) {
 				}
 			}
 			c := retentionTestClient(t, m)
-			r := &VmwareCloudFoundationMigrationReconciler{Client: c, Recorder: events.NewFakeRecorder(10)}
+			r := &VmwareCloudFoundationMigrationReconciler{
+				Client: c, Recorder: events.NewFakeRecorder(10),
+				StorageController: &storage.StorageController{Client: c},
+			}
 			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(m)}); err != nil {
 				t.Fatal(err)
 			}
@@ -165,7 +169,10 @@ func TestRetentionFinalizerConflicts(t *testing.T) {
 				}
 				return underlying.Patch(ctx, obj, patch, opts...)
 			}})
-			r := &VmwareCloudFoundationMigrationReconciler{Client: wrapped, Recorder: events.NewFakeRecorder(10)}
+			r := &VmwareCloudFoundationMigrationReconciler{
+				Client: wrapped, Recorder: events.NewFakeRecorder(10),
+				StorageController: &storage.StorageController{Client: wrapped},
+			}
 			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(m)}); err != nil {
 				t.Fatal(err)
 			}

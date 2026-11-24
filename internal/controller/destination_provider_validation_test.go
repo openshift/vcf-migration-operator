@@ -16,6 +16,7 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 )
 
 func TestDestinationProviderValidationWithoutSources(t *testing.T) {
@@ -116,7 +117,7 @@ func TestEnsureWorkloadMigratedRejectsWrongServerAfterSourceDeletion(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			if findFailureDomainByName(infra.Spec.PlatformSpec.VSphere.FailureDomains, "source-fd-1") == nil {
+			if util.FindFailureDomainByName(infra.Spec.PlatformSpec.VSphere.FailureDomains, "source-fd-1") == nil {
 				t.Error("source failure domain cleaned up")
 			}
 			for _, action := range r.MachineClient.(*fakemachineclient.Clientset).Actions() {

@@ -302,42 +302,23 @@ endif
 bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
-	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
+	@# Operator SDK rewrites createdAt on every run. Keep it when regenerating an existing CSV.
+	csv=bundle/manifests/vcf-migration-operator.clusterserviceversion.yaml; \
+	created_at=; \
+	if [ -f "$$csv" ]; then \
+		created_at=$$(sed -n 's/^    createdAt: "\([0-9TZ:-]*\)"$$/\1/p' "$$csv"); \
+	fi; \
+	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS); \
+	if [ -n "$$created_at" ]; then \
+		sed -i.bak "s/^    createdAt: .*/    createdAt: \"$$created_at\"/" "$$csv"; \
+		rm -f "$$csv.bak"; \
+	fi
 	$(OPERATOR_SDK) bundle validate ./bundle
 	VERSION=$(VERSION) hack/patch-bundle-dockerfile.sh
 
 .PHONY: bundle-verify
-bundle-verify: ## Verify that 'make bundle' was run and the bundle is up-to-date
-	@echo "#############################################"
-	@echo "####### Preparing to verify the bundle ######"
-	@echo "#############################################"
-	@# Save the createdAt timestamp to preserve it across bundle regeneration
-	@rm -f *.clusterserviceversion.yaml.created-at
-	@if grep -rl 'createdAt:' bundle/manifests 2>/dev/null; then \
-		grep -rl 'createdAt:' bundle/manifests | xargs -I {} sh -c 'grep "createdAt:" {} | cut -d\" -f2 > $$(basename {}).created-at'; \
-	fi
-	@echo "######################################################"
-	@echo "###### Run the creation of the bundle manifests ######"
-	@echo "######################################################"
-	@$(MAKE) bundle
-	@echo "##########################################################################################################"
-	@echo "###### Restoring the createdAt timestamp in the bundle/manifests/*.clusterserviceversion.yaml files ######"
-	@echo "##########################################################################################################"
-	@# Restore the createdAt timestamp in the CSV files
-	@for file in *.clusterserviceversion.yaml.created-at; do \
-		[ -e "$${file}" ] || break; \
-		created_at=$$(cat $${file}); \
-		sed -i.bak "s/createdAt: .*/createdAt: \"$${created_at}\"/" bundle/manifests/$${file%.created-at}; \
-		rm -f bundle/manifests/$${file%.created-at}.bak; \
-	done
-	@rm -f ./*.clusterserviceversion.yaml.created-at
-	@echo "################################################################################################"
-	@echo "#### Verifying no other files changed in the working tree after the bundle generation test ####"
-	@echo "################################################################################################"
+bundle-verify: bundle ## Verify that 'make bundle' was run and the bundle is up-to-date
 	@$(MAKE) verify-diff
-	@echo "########################################################################"
-	@echo "#### ✓ Bundle verification successful - bundle is up to date! ####"
-	@echo "########################################################################"
 
 .PHONY: verify-diff
 verify-diff: ## Verify that no files have changed in the versioned working tree

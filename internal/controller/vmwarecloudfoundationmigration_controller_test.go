@@ -24,6 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
+	"github.com/openshift/vcf-migration-operator/internal/util"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	configv1 "github.com/openshift/api/config/v1"
@@ -528,10 +531,11 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 		It("should set the Ready condition to False with reason Paused and transition to Progressing on resume", func() {
 			fakeRecorder := events.NewFakeRecorder(10)
 			controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
-				Client:     k8sClient,
-				Scheme:     k8sClient.Scheme(),
-				KubeClient: fakekube.NewClientset(),
-				Recorder:   fakeRecorder,
+				Client:            k8sClient,
+				StorageController: &storage.StorageController{Client: k8sClient, Recorder: fakeRecorder},
+				Scheme:            k8sClient.Scheme(),
+				KubeClient:        fakekube.NewClientset(),
+				Recorder:          fakeRecorder,
 			}
 
 			// The first reconcile adds the record-retention finalizer and returns.
@@ -672,12 +676,12 @@ var _ = Describe("updateStatus", func() {
 		Expect(k8sClient.Get(ctx, typeNamespacedName, migrationB)).To(Succeed())
 		baseB := *migrationB.Status.DeepCopy()
 
-		reconciler.setCondition(migrationA, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "preflight passed")
+		util.SetCondition(migrationA, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "preflight passed")
 		Expect(reconciler.updateStatus(ctx, migrationA, baseA)).To(Succeed())
 
 		// migrationB's in-memory status predates migrationA's write, so it
 		// knows nothing about ConditionInfrastructurePrepared.
-		reconciler.setCondition(migrationB, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, "stale failure")
+		util.SetCondition(migrationB, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, "stale failure")
 		Expect(reconciler.updateStatus(ctx, migrationB, baseB)).To(Succeed())
 
 		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
@@ -716,11 +720,11 @@ var _ = Describe("updateStatus", func() {
 		migrationCurrent := &migrationv1alpha1.VmwareCloudFoundationMigration{}
 		Expect(k8sClient.Get(ctx, typeNamespacedName, migrationCurrent)).To(Succeed())
 		baseCurrent := *migrationCurrent.Status.DeepCopy()
-		reconciler.setCondition(migrationCurrent, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "current progress")
+		util.SetCondition(migrationCurrent, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "current progress")
 		Expect(reconciler.updateStatus(ctx, migrationCurrent, baseCurrent)).To(Succeed())
 
 		// The stale reconcile still holds generation 1 and tries to persist a failure.
-		reconciler.setCondition(migrationStale, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, "stale failure")
+		util.SetCondition(migrationStale, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, "stale failure")
 		Expect(reconciler.updateStatus(ctx, migrationStale, baseStale)).To(Succeed())
 
 		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
@@ -802,12 +806,12 @@ var _ = Describe("updateStatus", func() {
 		baseB := *migrationB.Status.DeepCopy()
 
 		// The concurrent success commits first.
-		reconciler.setCondition(migrationA, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "destination initialized")
+		util.SetCondition(migrationA, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "destination initialized")
 		Expect(reconciler.updateStatus(ctx, migrationA, baseA)).To(Succeed())
 
 		// A later, stale reconcile that started from the same snapshot failed
 		// and now persists its failure.
-		reconciler.setCondition(migrationB, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, "stale failure")
+		util.SetCondition(migrationB, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, "stale failure")
 		Expect(reconciler.updateStatus(ctx, migrationB, baseB)).To(Succeed())
 
 		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
@@ -912,7 +916,7 @@ var _ = Describe("updateStatus", func() {
 
 		now := metav1.Now()
 		migration.Status.CompletionTime = &now
-		reconciler.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Migration complete")
+		util.SetCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Migration complete")
 
 		Expect(reconciler.updateStatus(ctx, migration, base)).To(Succeed())
 
@@ -943,7 +947,7 @@ var _ = Describe("updateStatus", func() {
 		migration.Status.FailureDomainMappings = []migrationv1alpha1.FailureDomainMapping{
 			{Source: "source-fd-a", Destination: "target-fd-1"},
 		}
-		reconciler.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Preflight validation passed")
+		util.SetCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Preflight validation passed")
 		Expect(reconciler.updateStatus(ctx, migration, base)).To(Succeed())
 
 		// A later reconcile holding no mappings must not clear the recorded ones.
@@ -1116,6 +1120,7 @@ var _ = Describe("Deletion finalizer", func() {
 		}
 
 		By("adding the record-retention finalizer on the first reconcile")
+		controllerReconciler.StorageController = &storage.StorageController{Client: k8sClient, Recorder: fakeRecorder}
 		_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
@@ -1191,6 +1196,7 @@ var _ = Describe("Deletion finalizer", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("marking the migration complete")
+		controllerReconciler.StorageController = &storage.StorageController{Client: k8sClient, Recorder: fakeRecorder}
 		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
 		completionTime := metav1.Now()
 		resource.Status.CompletionTime = &completionTime
@@ -1237,6 +1243,7 @@ var _ = Describe("Deletion finalizer", func() {
 		}
 
 		By("adding the record-retention finalizer on the first reconcile")
+		controllerReconciler.StorageController = &storage.StorageController{Client: k8sClient, Recorder: fakeRecorder}
 		_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())

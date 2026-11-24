@@ -15,6 +15,7 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 )
 
 // resolveFailureDomainMappings returns the effective source-to-destination
@@ -80,7 +81,7 @@ func sourceVCenterServer(infraFDs []configv1.VSpherePlatformFailureDomainSpec, m
 	if len(mappings) == 0 {
 		return "", fmt.Errorf("no failure domain mappings recorded in status: preflight must complete before workload migration")
 	}
-	fd := findFailureDomainByName(infraFDs, mappings[0].Source)
+	fd := util.FindFailureDomainByName(infraFDs, mappings[0].Source)
 	if fd == nil {
 		return "", fmt.Errorf("resolving source failure domain %q in infrastructure", mappings[0].Source)
 	}
@@ -220,7 +221,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) validateMachineSetNameCollisi
 			}
 		}
 		bases = append(bases, base)
-		source := findFailureDomainByName(sourceFDs, mappings[i].Source)
+		source := util.FindFailureDomainByName(sourceFDs, mappings[i].Source)
 		if source == nil {
 			return fmt.Errorf("resolving source failure domain %q", mappings[i].Source)
 		}
@@ -635,7 +636,7 @@ func recoverUnrecordedDestinationNames(ctx context.Context, machineMgr *openshif
 	var recovered []string
 
 	for i := range mappings {
-		sourceFD := findFailureDomainByName(sourceFDs, mappings[i].Source)
+		sourceFD := util.FindFailureDomainByName(sourceFDs, mappings[i].Source)
 		var matched []*machinev1beta1.MachineSet
 		if sourceFD != nil {
 			for _, ms := range msList {
@@ -651,7 +652,7 @@ func recoverUnrecordedDestinationNames(ctx context.Context, machineMgr *openshif
 				}
 			}
 		}
-		destFD := findFailureDomainByName(migration.Spec.FailureDomains, mappings[i].Destination)
+		destFD := util.FindFailureDomainByName(migration.Spec.FailureDomains, mappings[i].Destination)
 		if destFD == nil {
 			return nil, fmt.Errorf("resolving destination failure domain %q for mapping from %q", mappings[i].Destination, mappings[i].Source)
 		}

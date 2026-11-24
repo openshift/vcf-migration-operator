@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/execution"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 )
@@ -115,8 +116,11 @@ func TestReconcileStopsAtUncachedHandlerBoundary(t *testing.T) {
 	if err := live.Delete(ctx, m); err != nil {
 		t.Fatal(err)
 	}
-	r := &VmwareCloudFoundationMigrationReconciler{Client: cache, APIReader: live, Recorder: events.NewFakeRecorder(10)}
-	// No workflow clients are installed: entering the preflight handler would panic.
+	r := &VmwareCloudFoundationMigrationReconciler{
+		Client: cache, APIReader: live, Recorder: events.NewFakeRecorder(10),
+		StorageController: &storage.StorageController{Client: cache, APIReader: live},
+	}
+	// Preflight clients are omitted: entering the preflight handler would panic.
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(m)}); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +243,10 @@ func TestReconcileDeniedFromStartWritesNothing(t *testing.T) {
 	if err := live.Delete(ctx, m); err != nil {
 		t.Fatal(err)
 	}
-	r := &VmwareCloudFoundationMigrationReconciler{Client: counting, APIReader: live, Recorder: events.NewFakeRecorder(10)}
+	r := &VmwareCloudFoundationMigrationReconciler{
+		Client: counting, APIReader: live, Recorder: events.NewFakeRecorder(10),
+		StorageController: &storage.StorageController{Client: counting, APIReader: live},
+	}
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(m)}); err != nil {
 		t.Fatal(err)
 	}

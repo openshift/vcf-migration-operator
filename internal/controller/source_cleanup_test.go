@@ -9,6 +9,7 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	configfake "github.com/openshift/client-go/config/clientset/versioned/fake"
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/metadata"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 	corev1 "k8s.io/api/core/v1"
@@ -694,6 +695,7 @@ func TestReconcileSourceCleanedFailureRetried(t *testing.T) {
 	})
 
 	reconciler, fakeClient := newCleanupTestReconciler(t, migration, cfgClient, kubeClient)
+	reconciler.StorageController = &storage.StorageController{Client: fakeClient, Recorder: reconciler.Recorder}
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)}
 
 	// First reconcile: fails partway through cleanup.
@@ -745,11 +747,12 @@ func TestReconcileSourceCleanedFailureRetried(t *testing.T) {
 	}
 	retryKube := fakekube.NewSimpleClientset(cm, creds, newCleanupTestTargetSecret())
 	retryReconciler := &VmwareCloudFoundationMigrationReconciler{
-		Client:       fakeClient,
-		Scheme:       reconciler.Scheme,
-		KubeClient:   retryKube,
-		ConfigClient: cfgClient,
-		Recorder:     events.NewFakeRecorder(10),
+		Client:            fakeClient,
+		StorageController: &storage.StorageController{Client: fakeClient},
+		Scheme:            reconciler.Scheme,
+		KubeClient:        retryKube,
+		ConfigClient:      cfgClient,
+		Recorder:          events.NewFakeRecorder(10),
 	}
 
 	if _, err := retryReconciler.Reconcile(ctx, req); err != nil {

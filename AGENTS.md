@@ -60,39 +60,24 @@ test/utils/            Test utility helpers
 
 ## Code Style
 
-### Imports
+### Extending Existing Behavior
 
-Three groups separated by blank lines: (1) stdlib, (2) third-party, (3) project-internal. Each group alphabetically sorted. Enforced by `goimports` via golangci-lint.
+Before adding a function, read the closest existing implementation, its callers, and its tests. If the old case is a special case of the new one (one node attach limit becomes several), generalize that implementation and update its callers. Keep the old signature as a thin wrapper only when compatibility requires it. Cover both cases through the shared path so a bug fix needs only one change.
 
-```go
-import (
-    "context"
-    "fmt"
+### Imports and Formatting
 
-    apierrors "k8s.io/apimachinery/pkg/api/errors"
-    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-    ctrl "sigs.k8s.io/controller-runtime"
-    "sigs.k8s.io/controller-runtime/pkg/client"
-
-    migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
-    "github.com/openshift/vcf-migration-operator/internal/openshift"
-)
-```
+Group imports in order: standard library, third-party, project-internal. Separate groups with blank lines. Run `make lint`; formatting and linter settings live in [`.golangci.yml`](.golangci.yml).
 
 Standard aliases: `apierrors`, `apimeta`, `metav1`, `corev1`, `ctrl`, `migrationv1alpha1`. Ginkgo/Gomega use dot imports in test files only.
 
-### Formatting
-
-Go default formatting (`gofmt`). No `.editorconfig`. Golangci-lint enforces `gofmt` and `goimports` as formatters.
-
 ### Conditional Readability
 
-- Prefer simple guard clauses and explicit steps over dense compound boolean expressions. Split independent eligibility, lifecycle, and concurrency checks into separate decisions.
-- Use meaningful boolean names that state the decision directly, such as `skipCondition` or `keepExistingSuccess`. Avoid double negatives and negated compound expressions.
-- Favor a few extra readable lines over compressed logic. Explain non-obvious reasons for a check; preserve behavior when simplifying existing code.
+- When several clauses express one domain decision, prefer a positively named, side-effect-free predicate such as `isStoragePlanRefreshing(migration)`, even for one caller. A reader should understand the decision without expanding the helper.
+- Separate independent checks with guard clauses; use a `switch` for alternatives on the same state. Avoid double negatives. Preserve short-circuit behavior, especially nil checks before dereferences.
 
 ### Naming Conventions
 
+- **Domain values**: Distinguish resources, their names, and their plans. Use `namespaceNames` for a slice of names; `plan.NamespaceMigrationPlanInstances[namespace]` returns a plan, not a Kubernetes Namespace.
 - **Types**: PascalCase. Manager pattern: `SecretManager`, `InfrastructureManager`, `PodManager`.
 - **Constructors**: `NewSecretManager(client) *SecretManager`.
 - **Getters**: `Get` prefix: `GetVSphereCredsSecret`, `GetSourceVCenter`.
@@ -101,7 +86,7 @@ Go default formatting (`gofmt`). No `.editorconfig`. Golangci-lint enforces `gof
 - **Constants**: Exported PascalCase (`VSphereCredsSecretName`), unexported camelCase (`cvoNamespace`).
 - **Enum types**: `type MigrationState string` with `MigrationStateRunning` etc.
 - **Receivers**: Single letter (`r` for Reconciler, `s` for SecretManager, `m` for InfrastructureManager).
-- **Loop variables**: Short names (`fd`, `ms`, `vc`, `pod`). Use `&slice[i]` for pointer access.
+- **Loop variables**: Use short names (`fd`, `ms`, `vc`, `pod`). Prefer ranging over values for read-only work. Use `&slice[i]` when the original element's address is needed.
 - **Test variables**: `tt` for table cases, `got`/`want` for actual/expected.
 
 ### Error Handling
@@ -152,6 +137,7 @@ Kubebuilder-scaffolded files (controller, types, cmd/main, suite_test) use the A
 - CRD types in `api/v1alpha1/` follow kubebuilder conventions with markers (`+kubebuilder:rbac`, `+kubebuilder:validation`, `+optional`).
 - Manager structs hold an interface-typed client field (unexported), constructed via `NewXxxManager`.
 - Reconciler uses embedded `client.Client` and exported fields for injected dependencies.
+- The reconciler decides when to plan, persists the result, updates conditions, and requeues. Storage planning rules belong in `internal/storageplan`: adding a rule that blocks a volume should normally require changes only to the planner and its tests.
 
 ### Testing
 
@@ -175,7 +161,3 @@ r.Recorder.Eventf(migration, "Warning", "ConditionFailed", "Condition %s failed:
 - 10s for quick retries (resource deletion)
 - 15s for medium waits (pod readiness, CVO checks)
 - 30s for long waits (machine readiness, rollout stability)
-
-### Linters Enabled
-
-golangci-lint v2 with: `copyloopvar`, `dupl`, `errcheck`, `ginkgolinter`, `goconst`, `gocyclo`, `govet`, `ineffassign`, `lll`, `misspell`, `nakedret`, `prealloc`, `revive`, `staticcheck`, `unconvert`, `unparam`, `unused`. Revive rules: `comment-spacings`, `import-shadowing`.

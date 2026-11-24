@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/openshift/vcf-migration-operator/internal/util"
+
 	configv1 "github.com/openshift/api/config/v1"
 	configfake "github.com/openshift/client-go/config/clientset/versioned/fake"
 	"github.com/vmware/govmomi/find"
@@ -24,18 +26,21 @@ import (
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/storageplan"
 )
 
+// planningFixture applies test-specific overrides before wiring the storage controller.
 func planningFixture(t interface {
 	Helper()
 	Fatal(...any)
-}) (*VmwareCloudFoundationMigrationReconciler, *migrationv1alpha1.VmwareCloudFoundationMigration) {
+}, configure ...func(*VmwareCloudFoundationMigrationReconciler, *migrationv1alpha1.VmwareCloudFoundationMigration)) (*VmwareCloudFoundationMigrationReconciler, *migrationv1alpha1.VmwareCloudFoundationMigration) {
 	t.Helper()
 	m := &migrationv1alpha1.VmwareCloudFoundationMigration{
 		ObjectMeta: metav1.ObjectMeta{
@@ -77,7 +82,7 @@ func planningFixture(t interface {
 		t.Fatal(err)
 	}
 	r := &VmwareCloudFoundationMigrationReconciler{Scheme: scheme, Recorder: events.NewFakeRecorder(100)}
-	r.setCondition(m, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "validated")
+	util.SetCondition(m, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "validated")
 	r.Client = clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(m).WithStatusSubresource(m, &migrationv1alpha1.StorageWorkloadMigration{}).Build()
 	r.KubeClient = fakekube.NewClientset(
 		&corev1.PersistentVolume{
@@ -115,6 +120,10 @@ func planningFixture(t interface {
 	)
 	r.ConfigClient = configfake.NewClientset(&configv1.Infrastructure{ObjectMeta: metav1.ObjectMeta{Name: "cluster"}, Spec: configv1.InfrastructureSpec{PlatformSpec: configv1.PlatformSpec{VSphere: &configv1.VSpherePlatformSpec{FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{Name: "source", Region: "old-region", Zone: "old-zone"}}}}}, Status: configv1.InfrastructureStatus{InfrastructureName: "infra"}})
 	r.DynamicClient = dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "operator.openshift.io/v1", "kind": "ClusterCSIDriver", "metadata": map[string]interface{}{"name": vsphereCSIDriverName}, "spec": map[string]interface{}{"managementState": "Managed"}}})
+	for _, apply := range configure {
+		apply(r, m)
+	}
+	r.StorageController = storage.NewStorageController(r.Client, r.APIReader, r.KubeClient, r.ConfigClient, r.DynamicClient, r.Recorder)
 	return r, m
 }
 
@@ -180,9 +189,11 @@ func TestPlanningBoundaryAndRefresh(t *testing.T) {
 func TestPlanningStopsWhenPermissionChanges(t *testing.T) {
 	for _, change := range []string{"deletion", "paused", "generation"} {
 		t.Run(change, func(t *testing.T) {
-			r, m := planningFixture(t)
-			live := retentionTestClient(t, m.DeepCopy())
-			r.APIReader = live
+			var live client.Client
+			r, m := planningFixture(t, func(r *VmwareCloudFoundationMigrationReconciler, m *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				live = retentionTestClient(t, m.DeepCopy())
+				r.APIReader = live
+			})
 			r.KubeClient.(*fakekube.Clientset).PrependReactor("list", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
 				latest := m.DeepCopy()
 				if err := live.Get(context.Background(), client.ObjectKeyFromObject(m), latest); err != nil {
@@ -211,20 +222,20 @@ func TestPlanningStopsWhenPermissionChanges(t *testing.T) {
 }
 
 func TestPlanningStopsAfterInventoryCreation(t *testing.T) {
-	r, m := planningFixture(t)
-	live := retentionTestClient(t, m.DeepCopy())
-	r.APIReader = live
-	underlying := r.Client.(client.WithWatch)
-	r.Client = interceptor.NewClient(underlying, interceptor.Funcs{
-		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			if err := c.Create(ctx, obj, opts...); err != nil {
-				return err
-			}
-			return live.Delete(ctx, m.DeepCopy())
-		},
-		SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
-			return fmt.Errorf("writing status after deletion")
-		},
+	r, m := planningFixture(t, func(r *VmwareCloudFoundationMigrationReconciler, m *migrationv1alpha1.VmwareCloudFoundationMigration) {
+		live := retentionTestClient(t, m.DeepCopy())
+		r.APIReader = live
+		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if err := c.Create(ctx, obj, opts...); err != nil {
+					return err
+				}
+				return live.Delete(ctx, m.DeepCopy())
+			},
+			SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+				return fmt.Errorf("writing status after deletion")
+			},
+		})
 	})
 	reconcilePlan(t, r, m)
 	var plans migrationv1alpha1.StorageWorkloadMigrationList
@@ -327,52 +338,21 @@ func TestStorageManagementForPlan(t *testing.T) {
 	for _, state := range []string{"Managed", "Removed", "Unmanaged"} {
 		t.Run(state, func(t *testing.T) {
 			r, _ := planningFixture(t)
-			obj, err := r.DynamicClient.Resource(clusterCSIDriverGVR).Get(context.Background(), vsphereCSIDriverName, metav1.GetOptions{})
+			obj, err := r.DynamicClient.Resource(storage.ClusterCSIDriverGVR).Get(context.Background(), vsphereCSIDriverName, metav1.GetOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := unstructured.SetNestedField(obj.Object, state, "spec", "managementState"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := r.DynamicClient.Resource(clusterCSIDriverGVR).Update(context.Background(), obj, metav1.UpdateOptions{}); err != nil {
+			if _, err := r.DynamicClient.Resource(storage.ClusterCSIDriverGVR).Update(context.Background(), obj, metav1.UpdateOptions{}); err != nil {
 				t.Fatal(err)
 			}
-			_, err = checkStorageManagementForPlan(context.Background(), r.DynamicClient, true)
+			_, err = r.StorageController.CheckStorageManagement(context.Background(), true /* migrateStorage */)
 			if (err == nil) != (state == "Managed") {
-				t.Fatalf("checkStorageManagementForPlan(%s): %v", state, err)
+				t.Fatalf("CheckStorageManagement(%s): %v", state, err)
 			}
 		})
-	}
-}
-
-func TestStaleStoragePlans(t *testing.T) {
-	r, m := planningFixture(t)
-	reconcilePlan(t, r, m)
-	swm := &migrationv1alpha1.StorageWorkloadMigration{}
-	key := client.ObjectKey{Namespace: "app", Name: storagePlanName(m)}
-	if err := r.Get(context.Background(), key, swm); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate an execution phase that is not yet part of the API.
-	swm.Status.Phase = migrationv1alpha1.StorageWorkloadMigrationPhase("PreparingTargets")
-	if err := r.Status().Update(context.Background(), swm); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.deleteStaleStoragePlans(context.Background(), m, &storageplan.Plan{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Get(context.Background(), key, swm); err != nil {
-		t.Fatalf("advanced SWM deleted: %v", err)
-	}
-	swm.Status.Phase = migrationv1alpha1.StorageWorkloadMigrationPhasePlanning
-	if err := r.Status().Update(context.Background(), swm); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.deleteStaleStoragePlans(context.Background(), m, &storageplan.Plan{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Get(context.Background(), key, swm); err == nil {
-		t.Fatal("stale Planning SWM survived")
 	}
 }
 
@@ -406,8 +386,8 @@ func TestRunningStorageExecutionUnsupported(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Reconcile: %v", err)
 			}
-			if result.RequeueAfter != planningResync {
-				t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, planningResync)
+			if result.RequeueAfter != storage.PlanningResync {
+				t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, storage.PlanningResync)
 			}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(m), m); err != nil {
 				t.Fatal(err)
@@ -468,11 +448,11 @@ func TestStatusRejectsStalePlanDowngrade(t *testing.T) {
 	base := *m.Status.DeepCopy()
 	stale := m.DeepCopy()
 	// A concurrent writer changes the committed plan after this reconcile read it.
-	r.setCondition(m, migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "newer inventory")
+	util.SetCondition(m, migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "newer inventory")
 	if err := r.Status().Update(context.Background(), m); err != nil {
 		t.Fatal(err)
 	}
-	r.setCondition(stale, migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanBlocked, "stale blocker")
+	util.SetCondition(stale, migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanBlocked, "stale blocker")
 	if err := r.updateStatus(context.Background(), stale, base); err != nil {
 		t.Fatal(err)
 	}
@@ -540,9 +520,9 @@ func TestCustomerStoragePolicyPlanning(t *testing.T) {
 			if _, err := r.KubeClient.StorageV1().StorageClasses().Update(ctx, sc, metav1.UpdateOptions{}); err != nil {
 				t.Fatal(err)
 			}
-			_, err := r.ensureStoragePlanned(ctx, m)
+			_, err := r.StorageController.EnsureStoragePlanned(ctx, m)
 			if err != nil {
-				t.Fatalf("ensureStoragePlanned: %v", err)
+				t.Fatalf("EnsureStoragePlanned: %v", err)
 			}
 			condition := apimeta.FindStatusCondition(m.Status.Conditions, migrationv1alpha1.ConditionStoragePlanned)
 			if (condition.Status == metav1.ConditionFalse) != tt.blocked {
@@ -550,4 +530,82 @@ func TestCustomerStoragePolicyPlanning(t *testing.T) {
 			}
 		}
 	})
+}
+
+type fakeStorageController struct {
+	ensureCalls  int
+	cleanupCalls int
+	blockCalls   int
+	refreshCalls int
+	ensureFunc   func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error)
+	blockResult  bool
+	refresh      bool
+}
+
+func (f *fakeStorageController) EnsureStoragePlanned(ctx context.Context, m *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
+	f.ensureCalls++
+	if f.ensureFunc != nil {
+		return f.ensureFunc(ctx, m)
+	}
+	return ctrl.Result{}, nil
+}
+
+func (f *fakeStorageController) DeleteStaleStoragePlans(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration, *storageplan.Plan) error {
+	f.cleanupCalls++
+	return nil
+}
+
+func (f *fakeStorageController) BlockUnsupportedStorageMigration(*migrationv1alpha1.VmwareCloudFoundationMigration) bool {
+	f.blockCalls++
+	return f.blockResult
+}
+
+func (f *fakeStorageController) ShouldRefreshPlan(*migrationv1alpha1.VmwareCloudFoundationMigration) bool {
+	f.refreshCalls++
+	return f.refresh
+}
+
+func (f *fakeStorageController) CheckStorageManagement(context.Context, bool) (string, error) {
+	return "", nil
+}
+
+func (f *fakeStorageController) SetupWatches(bldr *builder.Builder) *builder.Builder {
+	return bldr
+}
+
+func TestReconcilerDelegatesToStorageController(t *testing.T) {
+	r, m := planningFixture(t)
+	fake := &fakeStorageController{
+		refresh: true,
+		ensureFunc: func(_ context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
+			util.SetCondition(migration, migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "stubbed plan")
+			return ctrl.Result{}, nil
+		},
+	}
+	r.StorageController = fake
+
+	got := reconcilePlan(t, r, m)
+	if fake.ensureCalls != 1 {
+		t.Fatalf("EnsureStoragePlanned calls = %d, want 1", fake.ensureCalls)
+	}
+	if fake.refreshCalls != 1 {
+		t.Fatalf("ShouldRefreshPlan calls = %d, want 1", fake.refreshCalls)
+	}
+	requirePlanCondition(t, got, migrationv1alpha1.ConditionStoragePlanned, migrationv1alpha1.ReasonCompleted, metav1.ConditionTrue)
+
+	// Verify deletion delegates DeleteStaleStoragePlans to the injected StorageController.
+	ctx := context.Background()
+	got.Annotations = map[string]string{migrationv1alpha1.AnnotationAllowDeletion: "true"}
+	if err := r.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(got)}); err != nil {
+		t.Fatalf("Reconcile deletion: %v", err)
+	}
+	if fake.cleanupCalls != 1 {
+		t.Fatalf("DeleteStaleStoragePlans calls = %d, want 1", fake.cleanupCalls)
+	}
 }

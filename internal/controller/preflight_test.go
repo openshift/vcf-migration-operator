@@ -30,6 +30,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 )
@@ -184,7 +185,7 @@ func TestCheckVSphereStorageManagement(t *testing.T) {
 		{
 			name: "fails when csi api unavailable",
 			getErrors: map[schema.GroupVersionResource]error{
-				clusterCSIDriverGVR: &apimeta.NoResourceMatchError{PartialResource: clusterCSIDriverGVR},
+				storage.ClusterCSIDriverGVR: &apimeta.NoResourceMatchError{PartialResource: storage.ClusterCSIDriverGVR},
 			},
 			wantErr:        true,
 			wantErrContain: []string{"ClusterCSIDriver", vsphereCSIDriverName},
@@ -204,7 +205,8 @@ func TestCheckVSphereStorageManagement(t *testing.T) {
 				})
 			}
 
-			warning, err := checkVSphereStorageManagement(context.Background(), client)
+			storageController := &storage.StorageController{DynamicClient: client}
+			warning, err := storageController.CheckStorageManagement(context.Background(), false /* migrateStorage */)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("checkVSphereStorageManagement error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -823,10 +825,11 @@ func TestRunPreflightChecks(t *testing.T) {
 			dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, preflightListKinds(), dynamicObjects...)
 
 			reconciler := &VmwareCloudFoundationMigrationReconciler{
-				KubeClient:    kubeClient,
-				ConfigClient:  configClient,
-				DynamicClient: dynamicClient,
-				MachineClient: machinefake.NewSimpleClientset(tt.machineObjects...),
+				KubeClient:        kubeClient,
+				ConfigClient:      configClient,
+				DynamicClient:     dynamicClient,
+				StorageController: &storage.StorageController{DynamicClient: dynamicClient},
+				MachineClient:     machinefake.NewSimpleClientset(tt.machineObjects...),
 				checkNetworkingViaProbeVMsFunc: func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration, *configv1.VSpherePlatformVCenterSpec) error {
 					return nil
 				},
@@ -885,11 +888,11 @@ func newManagementStateResource(kind, name, managementState string) *unstructure
 
 func preflightListKinds() map[schema.GroupVersionResource]string {
 	return map[schema.GroupVersionResource]string{
-		machineHealthCheckGVR: "MachineHealthCheckList",
-		clusterAutoscalerGVR:  "ClusterAutoscalerList",
-		machineAutoscalerGVR:  "MachineAutoscalerList",
-		clusterCSIDriverGVR:   "ClusterCSIDriverList",
-		storageOperatorGVR:    "StorageList",
+		machineHealthCheckGVR:       "MachineHealthCheckList",
+		clusterAutoscalerGVR:        "ClusterAutoscalerList",
+		machineAutoscalerGVR:        "MachineAutoscalerList",
+		storage.ClusterCSIDriverGVR: "ClusterCSIDriverList",
+		storage.StorageOperatorGVR:  "StorageList",
 	}
 }
 

@@ -12,14 +12,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/storageplan"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 )
 
 var _ = Describe("Storage planning against the API server", func() {
 	It("persists blocker changes and revalidates Planning to Running before disruption", func() {
-		r, m := planningFixture(GinkgoT())
+		r, m := planningFixture(GinkgoT(), func(r *VmwareCloudFoundationMigrationReconciler, _ *migrationv1alpha1.VmwareCloudFoundationMigration) {
+			r.Client = k8sClient
+		})
 		targetFD := m.Spec.FailureDomains[0].Name
-		r.Client = k8sClient
 		m.UID = ""
 		m.ResourceVersion = ""
 		m.Generation = 0
@@ -34,18 +37,18 @@ var _ = Describe("Storage planning against the API server", func() {
 		if err := k8sClient.Create(ctx, namespace); err != nil {
 			Expect(apierrors.IsAlreadyExists(err)).To(BeTrue())
 		}
-		r.setCondition(m, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "preflight validated")
+		util.SetCondition(m, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "preflight validated")
 		Expect(k8sClient.Status().Update(ctx, m)).To(Succeed())
 		req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(m)}
 		result, err := r.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result.RequeueAfter).To(Equal(planningResync))
+		Expect(result.RequeueAfter).To(Equal(storage.PlanningResync))
 		Expect(k8sClient.Get(ctx, req.NamespacedName, m)).To(Succeed())
 		Expect(m.Status.StartTime).To(BeNil())
 		Expect(apimeta.FindStatusCondition(m.Status.Conditions, migrationv1alpha1.ConditionReady).Reason).To(Equal(migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning))
 		Expect(apimeta.FindStatusCondition(m.Status.Conditions, migrationv1alpha1.ConditionDestinationInitialized)).To(BeNil())
 		swm := &migrationv1alpha1.StorageWorkloadMigration{}
-		swmKey := client.ObjectKey{Namespace: "app", Name: storagePlanName(m)}
+		swmKey := client.ObjectKey{Namespace: "app", Name: storage.PlanName(m)}
 		Expect(k8sClient.Get(ctx, swmKey, swm)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, swm)).To(Succeed()) })
 		Expect(swm.Status.Phase).To(Equal(migrationv1alpha1.StorageWorkloadMigrationPhasePlanning))
@@ -80,7 +83,7 @@ var _ = Describe("Storage planning against the API server", func() {
 		Expect(preflight.ObservedGeneration).To(Equal(m.Generation))
 		Expect(m.Status.StartTime).To(BeNil())
 		// Once infrastructure revalidation passes, storage must also re-run for the new generation.
-		r.setCondition(m, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "revalidated")
+		util.SetCondition(m, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "revalidated")
 		Expect(k8sClient.Status().Update(ctx, m)).To(Succeed())
 		pv, err := r.KubeClient.CoreV1().PersistentVolumes().Get(ctx, "pv", metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())

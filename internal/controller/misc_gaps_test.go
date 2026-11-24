@@ -28,6 +28,7 @@ import (
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/execution"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 )
 
 // Shared literals reused across controller tests, hoisted for goconst.
@@ -62,7 +63,7 @@ func TestGetTargetCredentials(t *testing.T) {
 	}
 
 	t.Run("success", func(t *testing.T) {
-		u, p, err := getTargetCredentials(context.Background(), kube, migration, testVCServer)
+		u, p, err := util.GetTargetCredentials(context.Background(), kube, migration, testVCServer)
 		if err != nil {
 			t.Fatalf("getTargetCredentials = %v, want nil", err)
 		}
@@ -71,7 +72,7 @@ func TestGetTargetCredentials(t *testing.T) {
 		}
 	})
 	t.Run("unknown server key", func(t *testing.T) {
-		_, _, err := getTargetCredentials(context.Background(), kube, migration, "9.9.9.9")
+		_, _, err := util.GetTargetCredentials(context.Background(), kube, migration, "9.9.9.9")
 		if err == nil || !strings.Contains(err.Error(), "getting target credentials for 9.9.9.9") {
 			t.Fatalf("err = %v, want unknown-server error", err)
 		}
@@ -79,7 +80,7 @@ func TestGetTargetCredentials(t *testing.T) {
 	t.Run("empty secret name", func(t *testing.T) {
 		m := migration.DeepCopy()
 		m.Spec.TargetVCenterCredentialsSecret.Name = ""
-		_, _, err := getTargetCredentials(context.Background(), kube, m, testVCServer)
+		_, _, err := util.GetTargetCredentials(context.Background(), kube, m, testVCServer)
 		if err == nil || !strings.Contains(err.Error(), "spec.targetVCenterCredentialsSecret.name must not be empty") {
 			t.Fatalf("err = %v, want empty-name error", err)
 		}
@@ -87,7 +88,7 @@ func TestGetTargetCredentials(t *testing.T) {
 	t.Run("empty namespace falls back to migration namespace", func(t *testing.T) {
 		m := migration.DeepCopy()
 		m.Spec.TargetVCenterCredentialsSecret.Namespace = ""
-		u, _, err := getTargetCredentials(context.Background(), kube, m, testVCServer)
+		u, _, err := util.GetTargetCredentials(context.Background(), kube, m, testVCServer)
 		if err != nil || u != user {
 			t.Fatalf("got u=%q err=%v, want fallback to migration namespace", u, err)
 		}

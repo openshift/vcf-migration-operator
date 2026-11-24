@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 )
 
@@ -481,6 +482,7 @@ func newStatusWriteHarness(t *testing.T) *statusWriteHarness {
 		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
 		Build()
 	reconciler.Client = fakeClient
+	reconciler.StorageController = &storage.StorageController{Client: fakeClient, Recorder: reconciler.Recorder}
 	reconciler.Scheme = scheme
 	return &statusWriteHarness{reconciler: reconciler, fake: fakeClient}
 }

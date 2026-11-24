@@ -17,8 +17,6 @@ import (
 	configfake "github.com/openshift/client-go/config/clientset/versioned/fake"
 	fakemachineclient "github.com/openshift/client-go/machine/clientset/versioned/fake"
 	machineconfigfake "github.com/openshift/client-go/machineconfiguration/clientset/versioned/fake"
-	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
-	"github.com/openshift/vcf-migration-operator/internal/openshift"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -33,6 +31,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
+	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 )
 
 // machinePhaseRunning is the machinev1beta1 Machine Phase value for a running
@@ -689,13 +692,13 @@ func TestReconcileWorkloadMigratedFailedWorkerMachine(t *testing.T) {
 		},
 	}
 	// A reverted mapping edit must not leave the old rejection persisted.
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonMappingRejected, "previous mapping drift")
+	util.SetCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonMappingRejected, "previous mapping drift")
 	// Earlier phases are complete so Reconcile dispatches straight to
 	// ensureWorkloadMigrated.
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionTrue, migrationv1alpha1.ReasonNotConfigured, completedMessage)
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	util.SetCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	util.SetCondition(migration, migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionTrue, migrationv1alpha1.ReasonNotConfigured, completedMessage)
+	util.SetCondition(migration, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	util.SetCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
 
 	scheme := runtime.NewScheme()
 	if err := migrationv1alpha1.AddToScheme(scheme); err != nil {
@@ -707,6 +710,7 @@ func TestReconcileWorkloadMigratedFailedWorkerMachine(t *testing.T) {
 		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
 		Build()
 	reconciler.Client = fakeClient
+	reconciler.StorageController = &storage.StorageController{Client: fakeClient, Recorder: reconciler.Recorder}
 	reconciler.Scheme = scheme
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)})
@@ -793,9 +797,9 @@ func TestScaleDownStopsOnUnmappedSourceMachineSet(t *testing.T) {
 	}
 	// Earlier phases are complete so Reconcile dispatches straight to
 	// ensureWorkloadMigrated.
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	util.SetCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	util.SetCondition(migration, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	util.SetCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
 
 	scheme := runtime.NewScheme()
 	if err := migrationv1alpha1.AddToScheme(scheme); err != nil {
@@ -807,6 +811,7 @@ func TestScaleDownStopsOnUnmappedSourceMachineSet(t *testing.T) {
 		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
 		Build()
 	reconciler.Client = fakeClient
+	reconciler.StorageController = &storage.StorageController{Client: fakeClient, Recorder: reconciler.Recorder}
 	reconciler.Scheme = scheme
 
 	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)})
@@ -895,9 +900,9 @@ func TestScaleDownRecoversUnrecordedDestinationMachineSetNames(t *testing.T) {
 			WorkerMachineSetNames: nil,
 		},
 	}
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
-	reconciler.setCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	util.SetCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	util.SetCondition(migration, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	util.SetCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
 
 	scheme := runtime.NewScheme()
 	if err := migrationv1alpha1.AddToScheme(scheme); err != nil {
@@ -909,6 +914,7 @@ func TestScaleDownRecoversUnrecordedDestinationMachineSetNames(t *testing.T) {
 		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
 		Build()
 	reconciler.Client = fakeClient
+	reconciler.StorageController = &storage.StorageController{Client: fakeClient, Recorder: reconciler.Recorder}
 	reconciler.Scheme = scheme
 
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)}); err != nil {
@@ -1509,13 +1515,13 @@ func TestBoundConditionMessage(t *testing.T) {
 			parts = append(parts, fmt.Sprintf("machine-%04d (10s old, CreateError)", i))
 		}
 		longMsg := fmt.Sprintf("Waiting for old worker deletion: source-worker-a has 1000 machine(s) [%s] and 0 node(s) remaining", strings.Join(parts, ", "))
-		if len(longMsg) <= maxConditionMessageBytes {
-			t.Fatalf("test precondition failed: longMsg length %d <= %d", len(longMsg), maxConditionMessageBytes)
+		if len(longMsg) <= util.MaxConditionMessageBytes {
+			t.Fatalf("test precondition failed: longMsg length %d <= %d", len(longMsg), util.MaxConditionMessageBytes)
 		}
 
 		bounded := boundConditionMessage(longMsg)
-		if len(bounded) > maxConditionMessageBytes {
-			t.Fatalf("bounded message length = %d, want <= %d", len(bounded), maxConditionMessageBytes)
+		if len(bounded) > util.MaxConditionMessageBytes {
+			t.Fatalf("bounded message length = %d, want <= %d", len(bounded), util.MaxConditionMessageBytes)
 		}
 		if !strings.Contains(bounded, "omitted") {
 			t.Fatalf("bounded message %q missing omission summary", bounded)
@@ -1794,6 +1800,7 @@ func TestReconcileRefusesToRecreateMissingDestinationAfterScaleDown(t *testing.T
 	migration := newDestinationRecoveryMigration([]string{targetMSName})
 	fakeClient, scheme := newDestinationRecoveryClient(t, migration)
 	reconciler.Client = fakeClient
+	reconciler.StorageController = &storage.StorageController{Client: fakeClient, Recorder: reconciler.Recorder}
 	reconciler.Scheme = scheme
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)}
 
@@ -1820,12 +1827,13 @@ func TestReconcileRefusesToRecreateMissingDestinationAfterScaleDown(t *testing.T
 	// A fresh reconciler, as after an operator restart, must not rebuild the
 	// destination from sources that no longer carry its replica counts.
 	fresh := &VmwareCloudFoundationMigrationReconciler{
-		KubeClient:    reconciler.KubeClient,
-		ConfigClient:  reconciler.ConfigClient,
-		MachineClient: reconciler.MachineClient,
-		Client:        fakeClient,
-		Scheme:        scheme,
-		Recorder:      events.NewFakeRecorder(50),
+		KubeClient:        reconciler.KubeClient,
+		ConfigClient:      reconciler.ConfigClient,
+		MachineClient:     reconciler.MachineClient,
+		Client:            fakeClient,
+		StorageController: &storage.StorageController{Client: fakeClient},
+		Scheme:            scheme,
+		Recorder:          events.NewFakeRecorder(50),
 	}
 	for i := 0; i < 2; i++ {
 		if _, err := fresh.Reconcile(ctx, req); err == nil {
@@ -1859,6 +1867,7 @@ func TestReconcileCreatesOriginallyZeroReplicaDestination(t *testing.T) {
 	migration := newDestinationRecoveryMigration(nil)
 	fakeClient, scheme := newDestinationRecoveryClient(t, migration)
 	reconciler.Client = fakeClient
+	reconciler.StorageController = &storage.StorageController{Client: fakeClient, Recorder: reconciler.Recorder}
 	reconciler.Scheme = scheme
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)}
 

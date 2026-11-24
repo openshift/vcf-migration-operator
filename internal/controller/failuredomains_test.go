@@ -19,6 +19,7 @@ import (
 	fakekube "k8s.io/client-go/kubernetes/fake"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 )
@@ -704,10 +705,11 @@ func TestRecordFailureDomainMappings(t *testing.T) {
 			)
 
 			reconciler := &VmwareCloudFoundationMigrationReconciler{
-				KubeClient:    kubeClient,
-				ConfigClient:  configClient,
-				DynamicClient: dynamicClient,
-				MachineClient: machinefake.NewSimpleClientset(),
+				KubeClient:        kubeClient,
+				ConfigClient:      configClient,
+				DynamicClient:     dynamicClient,
+				StorageController: &storage.StorageController{DynamicClient: dynamicClient},
+				MachineClient:     machinefake.NewSimpleClientset(),
 				checkNetworkingViaProbeVMsFunc: func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration, *configv1.VSpherePlatformVCenterSpec) error {
 					return nil
 				},

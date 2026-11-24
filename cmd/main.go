@@ -49,6 +49,7 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/controller"
+	"github.com/openshift/vcf-migration-operator/internal/controller/storage"
 	"github.com/openshift/vcf-migration-operator/internal/server"
 	// +kubebuilder:scaffold:imports
 )
@@ -224,6 +225,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	recorder := mgr.GetEventRecorder("vcf-migration-controller")
+	storageController := storage.NewStorageController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		kubeClient,
+		cfgClient,
+		dynClient,
+		recorder,
+	)
+
 	if err := (&controller.VmwareCloudFoundationMigrationReconciler{
 		Client:              mgr.GetClient(),
 		APIReader:           mgr.GetAPIReader(),
@@ -233,7 +244,8 @@ func main() {
 		MachineClient:       machClient,
 		MachineConfigClient: machineConfigClient,
 		DynamicClient:       dynClient,
-		Recorder:            mgr.GetEventRecorder("vcf-migration-controller"),
+		Recorder:            recorder,
+		StorageController:   storageController,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VmwareCloudFoundationMigration")
 		os.Exit(1)

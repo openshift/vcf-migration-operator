@@ -1,13 +1,15 @@
 package controller
 
 // Boundary and branch-coverage tests for the pure string/byte helpers used to
-// bound condition messages (maxConditionMessageBytes) and old-worker stall
-// event notes (maxEventNoteBytes). No clients needed.
+// bound condition messages (util.MaxConditionMessageBytes) and old-worker stall
+// event notes (util.MaxEventNoteBytes). No clients needed.
 
 import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/openshift/vcf-migration-operator/internal/util"
 )
 
 // sampleText is the truncation sample shared by the table cases below.
@@ -33,11 +35,14 @@ func TestTruncateToBytes(t *testing.T) {
 		{"len max plus one truncates", sampleText, 4, "hell"},
 		{"truncate to zero length prefix", sampleText, 0, ""},
 		{"truncate one byte", sampleText, 1, "h"},
+		{"cut inside a two-byte rune", "aéz", 2, "a"},
+		{"cut on a rune boundary", "aéz", 3, "aé"},
+		{"cut inside the first rune", "🐇z", 3, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := truncateToBytes(tt.in, tt.maxBytes); got != tt.want {
-				t.Fatalf("truncateToBytes(%q, %d) = %q, want %q", tt.in, tt.maxBytes, got, tt.want)
+			if got := util.TruncateToBytes(tt.in, tt.maxBytes); got != tt.want {
+				t.Fatalf("TruncateToBytes(%q, %d) = %q, want %q", tt.in, tt.maxBytes, got, tt.want)
 			}
 		})
 	}
@@ -154,8 +159,8 @@ func TestBoundOldWorkerStallEventNote(t *testing.T) {
 			{machineSetName: "ms-b", text: strings.Repeat("y", 600), machineNames: []string{"m3"}},
 		}
 		got := boundOldWorkerStallEventNote(parts)
-		if len(got) > maxEventNoteBytes {
-			t.Fatalf("got %d bytes, want <= %d", len(got), maxEventNoteBytes)
+		if len(got) > util.MaxEventNoteBytes {
+			t.Fatalf("got %d bytes, want <= %d", len(got), util.MaxEventNoteBytes)
 		}
 		if !strings.HasPrefix(got, oldWorkerStallEventPrefix) {
 			t.Fatalf("got %q, want the stall prefix", got)
@@ -169,8 +174,8 @@ func TestBoundOldWorkerStallEventNote(t *testing.T) {
 			{machineSetName: msA, text: strings.Repeat("z", 1100), machineNames: []string{"m1"}},
 		}
 		got := boundOldWorkerStallEventNote(parts)
-		if len(got) > maxEventNoteBytes {
-			t.Fatalf("got %d bytes, want <= %d", len(got), maxEventNoteBytes)
+		if len(got) > util.MaxEventNoteBytes {
+			t.Fatalf("got %d bytes, want <= %d", len(got), util.MaxEventNoteBytes)
 		}
 		want := oldWorkerStallEventPrefix + "; ... and 1 more machine(s) omitted: [m1]"
 		if got != want {
@@ -186,16 +191,16 @@ func TestBoundOldWorkerStallEventNote(t *testing.T) {
 // omitted-clamp-to-one path.
 func TestBoundConditionMessageBounds(t *testing.T) {
 	t.Run("exactly max unchanged", func(t *testing.T) {
-		msg := strings.Repeat("a", maxConditionMessageBytes)
+		msg := strings.Repeat("a", util.MaxConditionMessageBytes)
 		if got := boundConditionMessage(msg); got != msg {
-			t.Fatalf("len(got)=%d, want %d unchanged", len(got), maxConditionMessageBytes)
+			t.Fatalf("len(got)=%d, want %d unchanged", len(got), util.MaxConditionMessageBytes)
 		}
 	})
 	t.Run("one over max with no separators", func(t *testing.T) {
-		msg := strings.Repeat("a", maxConditionMessageBytes+1)
+		msg := strings.Repeat("a", util.MaxConditionMessageBytes+1)
 		got := boundConditionMessage(msg)
-		if len(got) > maxConditionMessageBytes {
-			t.Fatalf("got %d bytes, want <= %d", len(got), maxConditionMessageBytes)
+		if len(got) > util.MaxConditionMessageBytes {
+			t.Fatalf("got %d bytes, want <= %d", len(got), util.MaxConditionMessageBytes)
 		}
 		if !strings.HasSuffix(got, "; ... and 1 more machine(s) omitted") {
 			t.Fatalf("got %q, want the omitted marker", got)
@@ -207,12 +212,12 @@ func TestBoundConditionMessageBounds(t *testing.T) {
 			fmt.Fprintf(&b, "[w%d-0, w%d-1, w%d-2, w%d-3]; ", i, i, i, i)
 		}
 		msg := b.String()
-		if len(msg) <= maxConditionMessageBytes {
-			t.Fatalf("test setup: msg is %d bytes, want > %d", len(msg), maxConditionMessageBytes)
+		if len(msg) <= util.MaxConditionMessageBytes {
+			t.Fatalf("test setup: msg is %d bytes, want > %d", len(msg), util.MaxConditionMessageBytes)
 		}
 		got := boundConditionMessage(msg)
-		if len(got) > maxConditionMessageBytes {
-			t.Fatalf("got %d bytes, want <= %d", len(got), maxConditionMessageBytes)
+		if len(got) > util.MaxConditionMessageBytes {
+			t.Fatalf("got %d bytes, want <= %d", len(got), util.MaxConditionMessageBytes)
 		}
 		if !strings.HasSuffix(got, " more machine(s) omitted") {
 			t.Fatalf("got %q, want the omitted marker", got)
@@ -224,9 +229,9 @@ func TestBoundConditionMessageBounds(t *testing.T) {
 	t.Run("omitted clamped to one when prefix preserves all machines", func(t *testing.T) {
 		// All machines sit before the "; " separator; cutting at the separator
 		// preserves every machine, so omitted would be 0 and must clamp to 1.
-		msg := "[a, b, c]; " + strings.Repeat("f", maxConditionMessageBytes)
-		if len(msg) <= maxConditionMessageBytes {
-			t.Fatalf("test setup: msg is %d bytes, want > %d", len(msg), maxConditionMessageBytes)
+		msg := "[a, b, c]; " + strings.Repeat("f", util.MaxConditionMessageBytes)
+		if len(msg) <= util.MaxConditionMessageBytes {
+			t.Fatalf("test setup: msg is %d bytes, want > %d", len(msg), util.MaxConditionMessageBytes)
 		}
 		got := boundConditionMessage(msg)
 		if !strings.HasSuffix(got, "; ... and 1 more machine(s) omitted") {
@@ -237,12 +242,12 @@ func TestBoundConditionMessageBounds(t *testing.T) {
 
 // Residual (uncovered) branches in boundConditionMessage, both effectively
 // unreachable given its construction:
-//   - L2569 (maxPrefixLen <= 0): needs len(suffixEst) >= maxConditionMessageBytes,
+//   - L2569 (maxPrefixLen <= 0): needs len(suffixEst) >= util.MaxConditionMessageBytes,
 //     i.e. the machine count to have ~32,700 decimal digits (~10^32700 machines),
 //     which a just-over-limit message cannot contain.
 //   - L2587 (final truncate): len(prefix) <= maxPrefixLen and len(suffix) <=
 //     len(suffixEst) (omitted <= totalMachines, so the count has no more digits),
-//     so len(prefix)+len(suffix) can never exceed maxConditionMessageBytes.
+//     so len(prefix)+len(suffix) can never exceed util.MaxConditionMessageBytes.
 
 func TestCountMachinesInMessage(t *testing.T) {
 	tests := []struct {

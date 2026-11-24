@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-10-26T17:53:45Z"
+    createdAt: "2026-11-20T20:47:30Z"
     description: Orchestrates migration of an OpenShift cluster between VMware vCenter
       environments.
     features.operators.openshift.io/disconnected: "true"
