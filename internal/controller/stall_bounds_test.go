@@ -35,6 +35,9 @@ func TestTruncateToBytes(t *testing.T) {
 		{"len max plus one truncates", sampleText, 4, "hell"},
 		{"truncate to zero length prefix", sampleText, 0, ""},
 		{"truncate one byte", sampleText, 1, "h"},
+		{"cut inside a two-byte rune", "aéz", 2, "a"},
+		{"cut on a rune boundary", "aéz", 3, "aé"},
+		{"cut inside the first rune", "🐇z", 3, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

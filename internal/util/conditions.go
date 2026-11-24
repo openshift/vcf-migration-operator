@@ -1,6 +1,8 @@
 package util
 
 import (
+	"unicode/utf8"
+
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
@@ -49,7 +51,7 @@ func StatusConditionChanged(prev, next metav1.Condition) bool {
 		!prev.LastTransitionTime.Equal(&next.LastTransitionTime)
 }
 
-// TruncateToBytes truncates s to at most maxBytes bytes.
+// TruncateToBytes truncates s to at most maxBytes bytes without splitting a UTF-8 rune.
 func TruncateToBytes(s string, maxBytes int) string {
 	if maxBytes <= 0 {
 		return ""
@@ -57,5 +59,9 @@ func TruncateToBytes(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
 	}
-	return s[:maxBytes]
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
