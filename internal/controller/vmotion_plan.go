@@ -632,7 +632,7 @@ func buildVMotionPlan(migration *migrationv1alpha1.VmwareCloudFoundationMigratio
 		progress := migrationv1alpha1.NodeMigrationProgress{
 			Name: identity.node.Name, State: migrationv1alpha1.NodeMigrationStatePending, RequestedMode: mode,
 			VMBIOSUUID: biosUUID, NodeUID: identity.node.UID, ProviderID: identity.node.Spec.ProviderID,
-			OriginalSchedulingState: schedulingState, TargetFailureDomain: destinationFD.Name,
+			OriginalSchedulingState: schedulingState, TargetFailureDomain: destinationFD.Name, TargetDatacenter: destinationFD.Topology.Datacenter,
 			TargetResourcePool: resourcePool, TargetDatastore: destinationFD.Topology.Datastore,
 			TargetNetwork: destinationFD.Topology.Networks[0], SourceInventoryPath: vm.InventoryPath,
 		}
@@ -730,6 +730,18 @@ func vmotionPlanFingerprint(uid types.UID, frozen migrationv1alpha1.NodeMigratio
 // validateVMotionPlanStability reports every observed difference so the operator
 // can see what drifted; a frozen plan is never republished.
 func validateVMotionPlanStability(existing, candidate *migrationv1alpha1.NodeMigrationStatus) error {
+	if existing.PlanFingerprint == candidate.PlanFingerprint {
+		for _, role := range []*migrationv1alpha1.RoleMigrationStatus{existing.ControlPlane, existing.Workers} {
+			if role == nil {
+				continue
+			}
+			for _, node := range role.Nodes {
+				if node.TargetDatacenter == "" {
+					return fmt.Errorf("frozen VMotion plan requires upgrade/replan: legacy node %q has no recorded target datacenter; new claims remain blocked, recreate the migration before execution", node.Name)
+				}
+			}
+		}
+	}
 	drifted := vmotionFieldDrift([][3]string{
 		{"engine type", string(existing.Type), string(candidate.Type)},
 		{"migration UID", string(existing.MigrationUID), string(candidate.MigrationUID)},
@@ -799,6 +811,7 @@ func frozenNodeDrift(role string, existing, candidate *migrationv1alpha1.RoleMig
 			{"requested mode", string(previous.RequestedMode), string(node.RequestedMode)},
 			{"original scheduling state", string(previous.OriginalSchedulingState), string(node.OriginalSchedulingState)},
 			{"target failure domain", previous.TargetFailureDomain, node.TargetFailureDomain},
+			{"target datacenter", previous.TargetDatacenter, node.TargetDatacenter},
 			{"target resource pool", previous.TargetResourcePool, node.TargetResourcePool},
 			{"target datastore", previous.TargetDatastore, node.TargetDatastore},
 			{"target network", previous.TargetNetwork, node.TargetNetwork},

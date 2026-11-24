@@ -122,6 +122,8 @@ type VMotionTaskObservation struct {
 // controller may observe and persist the result of an already-claimed action
 // across pause or generation changes, bound to the same CR UID, execution ID,
 // and action ID. That permission never authorizes a new mutation.
+// Implementations must honor context cancellation so a bounded observation can
+// return control to reconciliation, including deletion handoff.
 type VMotionReadOnlyBackend interface {
 	// ListVMotionVMInventory resolves source compute-resource references and performs a read-only BIOS-UUID search in one datacenter.
 	ListVMotionVMInventory(ctx context.Context, vcenter, datacenter string, sourceFailureDomains []VMotionSourceFailureDomain, biosUUIDs []string) (VMotionInventory, error)
@@ -138,6 +140,9 @@ type VMotionReadOnlyBackend interface {
 // submission is represented as VMotionSubmissionUnknown and never authorizes a
 // retry. A returned task reference carries the vCenter that created it; an
 // ordinary error must indicate that submission was definitely rejected.
+// Implementations must honor context cancellation before initiating an external
+// request, including after internal waits; an expired claim cannot submit later.
+// Cancellation does not establish external inactivity for a request already sent.
 type VMotionMutationBackend interface {
 	// ShutdownGuest requests only graceful guest shutdown and returns no task reference.
 	ShutdownGuest(ctx context.Context, vcenter, datacenter, biosUUID string) (VMotionSubmission, error)
