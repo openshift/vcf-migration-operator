@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -39,13 +41,21 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateVMotionExecution(ctx co
 		if !sameVMotionExecution(expected, latest) {
 			return fmt.Errorf("merging VMotion execution: migration UID or frozen execution identity changed")
 		}
+		hadIntervention := latest.Status.NodeMigration.Intervention != nil
 		changed, err := change(latest)
 		if err != nil || !changed {
 			return err
 		}
 		now := metav1.Now()
 		latest.Status.LastUpdateTime = &now
-		return r.Status().Update(ctx, latest)
+		newIntervention := !hadIntervention && latest.Status.NodeMigration.Intervention != nil
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		if newIntervention && r.Recorder != nil {
+			r.Recorder.Eventf(latest, nil, "Warning", "VMotionInterventionRequired", "VMotionInterventionRequired", "%s", latest.Status.NodeMigration.Intervention.Reason)
+		}
+		return nil
 	})
 }
 
@@ -148,7 +158,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) submitVMotionAction(ctx conte
 			owner = s.FrozenPlan.DestinationVCenter
 		}
 		now := metav1.Now()
-		deadline := metav1.NewTime(now.Add(vmotionActionTimeout))
+		deadline := metav1.NewTime(now.Add(vmotionActionTimeout).Truncate(time.Second))
 		s.ActiveAction = &migrationv1alpha1.NodeMigrationAction{
 			ActionID: string(uuid.NewUUID()), ExecutionID: s.ExecutionID, Kind: kind,
 			NodeName: nodeName, NodeUID: node.NodeUID, VMBIOSUUID: node.VMBIOSUUID, OwnerVCenter: owner,
@@ -169,6 +179,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) submitVMotionAction(ctx conte
 	submitCtx, cancel := context.WithDeadline(ctx, a.Deadline.Time)
 	defer cancel()
 	submission, submitErr := callVMotionMutation(submitCtx, claimed, backend)
+	if submitCtx.Err() != nil {
+		submitErr = submitCtx.Err()
+	}
 	return r.persistVMotionSubmission(ctx, claimed, submission, submitErr)
 }
 
@@ -230,7 +243,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) persistVMotionSubmission(ctx 
 		now := metav1.Now()
 		a.SubmissionState = migrationv1alpha1.NodeMigrationSubmissionUnknown
 		a.Reason = "Submission outcome is uncertain; observe or request administrator revalidation, never replay"
-		if submitErr != nil && result.State == "" && result.TaskReference == nil {
+		if validVMotionTaskReference(a, result.TaskReference) {
+			a.TaskReference = &migrationv1alpha1.NodeMigrationTaskReference{OwnerVCenter: result.TaskReference.OwnerVCenter, TaskID: result.TaskReference.TaskID}
+		}
+		if submitErr != nil && !errors.Is(submitErr, context.Canceled) && !errors.Is(submitErr, context.DeadlineExceeded) && ctx.Err() == nil && result.State == "" && result.TaskReference == nil {
 			a.ObservationState = migrationv1alpha1.NodeMigrationObservationFailed
 			a.Reason = "Submission was rejected; administrator revalidation is required"
 		} else if submitErr == nil && validVMotionSubmission(a, result) {
@@ -258,7 +274,11 @@ func validVMotionSubmission(a *migrationv1alpha1.NodeMigrationAction, result vsp
 	if a.Kind == migrationv1alpha1.NodeMigrationActionShutdownGuest {
 		return result.TaskReference == nil
 	}
-	return result.TaskReference != nil && result.TaskReference.OwnerVCenter == a.OwnerVCenter && result.TaskReference.TaskID != "" && len(result.TaskReference.TaskID) <= 512
+	return validVMotionTaskReference(a, result.TaskReference)
+}
+
+func validVMotionTaskReference(a *migrationv1alpha1.NodeMigrationAction, ref *vsphere.VMotionTaskReference) bool {
+	return a.Kind != migrationv1alpha1.NodeMigrationActionShutdownGuest && ref != nil && ref.OwnerVCenter == a.OwnerVCenter && ref.TaskID != "" && len(ref.TaskID) <= 512
 }
 
 func setVMotionIntervention(s *migrationv1alpha1.NodeMigrationStatus, reason string, now metav1.Time) {
@@ -270,6 +290,9 @@ func setVMotionIntervention(s *migrationv1alpha1.NodeMigrationStatus, reason str
 }
 
 func vmotionOutcome(n *migrationv1alpha1.NodeMigrationProgress, kind migrationv1alpha1.NodeMigrationActionKind) **migrationv1alpha1.NodeMigrationOperationOutcome {
+	if n == nil {
+		return nil
+	}
 	switch kind {
 	case migrationv1alpha1.NodeMigrationActionShutdownGuest:
 		return &n.ShutdownOutcome
@@ -286,6 +309,9 @@ func recordVMotionOutcome(s *migrationv1alpha1.NodeMigrationStatus, now metav1.T
 	a := s.ActiveAction
 	n := vmotionActionNode(s, a.NodeName)
 	outcome := vmotionOutcome(n, a.Kind)
+	if outcome == nil {
+		return
+	}
 	state := migrationv1alpha1.NodeMigrationOutcomeUnknown
 	if a.ObservationState == migrationv1alpha1.NodeMigrationObservationSucceeded {
 		state = migrationv1alpha1.NodeMigrationOutcomeSucceeded
@@ -322,6 +348,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) observeVMotionAction(ctx cont
 	readCtx, cancel := context.WithTimeout(ctx, vmotionReadTimeout)
 	defer cancel()
 	state, reason := observeVMotionBackend(readCtx, expected, backend)
+	if readCtx.Err() != nil {
+		state, reason = migrationv1alpha1.NodeMigrationObservationUnknown, "Observation read budget expired; evidence remains uncertain"
+	}
 	now := metav1.Now()
 	return r.updateVMotionExecution(ctx, expected, func(latest *migrationv1alpha1.VmwareCloudFoundationMigration) (bool, error) {
 		s := latest.Status.NodeMigration
@@ -335,7 +364,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) observeVMotionAction(ctx cont
 		if a.Deadline == nil || !now.Before(a.Deadline) {
 			setVMotionIntervention(s, "Action deadline expired or is missing; late results do not authorize further mutations", now)
 		}
-		if state == migrationv1alpha1.NodeMigrationObservationUnknown || state == migrationv1alpha1.NodeMigrationObservationFailed {
+		if state == migrationv1alpha1.NodeMigrationObservationFailed || (state == migrationv1alpha1.NodeMigrationObservationUnknown && a.SubmissionState != migrationv1alpha1.NodeMigrationSubmissionSubmitted) {
 			setVMotionIntervention(s, reason, now)
 		}
 		if state != migrationv1alpha1.NodeMigrationObservationRunning {
@@ -378,10 +407,13 @@ func observeVMotionBackend(ctx context.Context, m *migrationv1alpha1.VmwareCloud
 	}
 	if a.Kind == migrationv1alpha1.NodeMigrationActionShutdownGuest {
 		vm, err := backend.InspectVM(ctx, a.OwnerVCenter, m.Status.NodeMigration.FrozenPlan.SourceDatacenter, a.VMBIOSUUID)
+		if err != nil {
+			klog.FromContext(ctx).V(2).Error(err, "inspecting VMotion shutdown evidence", "actionID", a.ActionID)
+		}
 		if err != nil || !strings.EqualFold(vm.BIOSUUID, a.VMBIOSUUID) {
 			return unknown, "Shutdown VM identity/power evidence is unavailable or mismatched"
 		}
-		if vm.PowerState == "poweredOff" {
+		if vm.PowerState == "poweredOff" && a.SubmissionState != migrationv1alpha1.NodeMigrationSubmissionClaimed {
 			return migrationv1alpha1.NodeMigrationObservationSucceeded, "Graceful shutdown observed powered off"
 		}
 		if vm.PowerState == "poweredOn" && a.SubmissionState == migrationv1alpha1.NodeMigrationSubmissionSubmitted {
@@ -394,6 +426,7 @@ func observeVMotionBackend(ctx context.Context, m *migrationv1alpha1.VmwareCloud
 	}
 	observation, err := backend.ObserveTask(ctx, a.TaskReference.OwnerVCenter, a.TaskReference.TaskID)
 	if err != nil {
+		klog.FromContext(ctx).V(2).Error(err, "observing VMotion task", "actionID", a.ActionID)
 		return unknown, "Task evidence is unavailable; task absence does not prove inactivity"
 	}
 	switch observation.State {
@@ -437,6 +470,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileVMotionAction(ctx co
 		if err := r.recheckVMotionRecovery(ctx, latest, r.VMotionRecoveryCheck); err != nil {
 			return true, ctrl.Result{}, err
 		}
+	}
+	// TODO(SPLAT-2703): the admitted node-workflow PR owns advancing terminal actions.
+	if terminalVMotionObservation(latest.Status.NodeMigration.ActiveAction.ObservationState) && latest.Status.NodeMigration.Intervention == nil {
+		*m = *latest
+		return false, ctrl.Result{}, nil
 	}
 	return true, ctrl.Result{RequeueAfter: vmotionObservationInterval}, nil
 }

@@ -650,7 +650,7 @@ func TestVMotionObservationConflictsAndTaskUncertainty(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := readExecution(t, r, m).Status.NodeMigration
-	if got.Progress != "keep concurrent progress" || got.Intervention == nil || got.Workers.Nodes[0].RelocationOutcome.State != migrationv1alpha1.NodeMigrationOutcomeUnknown {
+	if got.Progress != "keep concurrent progress" || got.Intervention != nil || got.Workers.Nodes[0].RelocationOutcome.State != migrationv1alpha1.NodeMigrationOutcomeUnknown {
 		t.Fatalf("lost conflict merge/uncertainty: %+v", got)
 	}
 	if got.ActiveAction.Reason == "missing task with secret details" {
@@ -902,8 +902,8 @@ func TestVMotionObservationTimeoutStillAllowsDeletionHandoff(t *testing.T) {
 			t.Fatalf("observation returned after %s, want bounded 30-second read", elapsed)
 		}
 		m = readExecution(t, r, m)
-		if m.Status.NodeMigration.Intervention == nil {
-			t.Fatal("timed-out read did not preserve uncertainty")
+		if m.Status.NodeMigration.Intervention != nil || m.Status.NodeMigration.ActiveAction.ObservationState != migrationv1alpha1.NodeMigrationObservationUnknown {
+			t.Fatal("timed-out read did not preserve retryable uncertainty")
 		}
 		m.Annotations = map[string]string{migrationv1alpha1.AnnotationAllowDeletion: allowDeletionAnnotationValue}
 		if err := r.Update(context.Background(), m); err != nil {
@@ -1113,7 +1113,7 @@ func TestVMotionClaimRejectsMissingFrozenDatacenter(t *testing.T) {
 }
 
 func TestVMotionRecoveryRefusalPreservesObservationCadence(t *testing.T) {
-	for _, name := range []string{"missing verifier", "stale action", "no intervention", "claimant still authorized", "uncertain evidence"} {
+	for _, name := range []string{"missing verifier", "stale action", "claimant still authorized", "uncertain evidence"} {
 		t.Run(name, func(t *testing.T) {
 			r, m := newVMotionExecutionFixture(t, interceptor.Funcs{})
 			b := &executionBackend{submit: func(context.Context) (vsphere.VMotionSubmission, error) {

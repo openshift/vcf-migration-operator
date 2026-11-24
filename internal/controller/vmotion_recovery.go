@@ -137,6 +137,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) recordBlockedVMotionRecovery(
 		if !reflect.DeepEqual(request, currentRequest) {
 			return false, nil
 		}
+		ack := latest.Status.NodeMigration.RecoveryAcknowledgement
+		if request != nil && ack != nil && ack.RequestID == request.RequestID && ack.ExecutionID == request.ExecutionID && ack.ActionID == request.ActionID && request.ActionID == latest.Status.NodeMigration.ActiveAction.ActionID {
+			return false, nil
+		}
+		if !reflect.DeepEqual(latest.Status.NodeMigration.Intervention, expected.Status.NodeMigration.Intervention) {
+			return false, nil
+		}
 		condition := apimeta.FindStatusCondition(latest.Status.Conditions, vmotionRecoveryCondition)
 		if condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == vmotionRecoveryBlockedReason && condition.Message == message && condition.ObservedGeneration == latest.Generation {
 			return false, nil

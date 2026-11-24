@@ -55,7 +55,9 @@ Acknowledged relocation/power-on submissions require a nonempty bounded task ID
 owned by the action's vCenter. Shutdown must have no task reference. Missing,
 wrong-owner, contradictory or uncertain submission evidence requires
 intervention. An ordinary backend error with no acknowledgement/task is a
-definite rejection under the shared backend contract. Error strings and task
+definite rejection under the shared backend contract, except cancellation or deadline
+expiry, which remains uncertain. Valid owner-scoped task references are retained
+even for uncertain submissions, solely for read-only observation. Error strings and task
 output are not copied into status; stored reasons are controller-owned text.
 
 ## Observation and deadlines
@@ -72,7 +74,10 @@ is retried by the next reconcile; it does not authorize mutation.
 
 Each observation and recovery verification has a separate 30-second read budget,
 matching the existing long-wait polling interval. Backend/verifier implementations
-must honor cancellation. A timed-out read leaves uncertainty/intervention intact,
+must honor cancellation. A timed-out read records uncertainty even if the backend
+returns success at cancellation. Transient read failures do not create intervention
+for acknowledged submissions; existing intervention remains intact. Deadline expiry
+and failed actions still require intervention. A timed-out read
 returns the worker to reconciliation, and permits subsequent deletion handoff.
 Observation timestamps also throttle polls: the CR watch sees status updates,
 so a self-generated status event must not immediately call the backend again.
@@ -83,6 +88,9 @@ Task observations use the stored owning vCenter, never a current destination
 selection. Missing/unknown task evidence is uncertainty, not proof of inactivity.
 Shutdown observes the frozen BIOS UUID in the frozen source datacenter and
 requires actual `poweredOff`; request acknowledgement alone is not completion.
+Power evidence cannot complete a still-Claimed shutdown: its claimant may yet send.
+Terminal actions without intervention return to normal workflow gates.
+`TODO(SPLAT-2703)`: the admitted node-workflow PR owns advancing terminal actions.
 No hard power-off or source-recovery power-on operation exists here.
 
 All three action deadlines initially use **six hours**, as requested for this
