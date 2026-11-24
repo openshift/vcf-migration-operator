@@ -6,6 +6,7 @@
 - Access to both source and target vCenter instances
 - Cluster admin privileges
 - vSphere CSI storage removed from the cluster (required by preflight; see [Preflight: vSphere CSI storage](#preflight-vsphere-csi-storage) below)
+- The [firewall and network rules](firewall-requirements.md) that apply to your migration opened before it starts
 
 ## Install the Operator
 
